@@ -106,7 +106,7 @@ jobs:
       - name: Download buildlet
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/go-builder-data/buildlet.windows-arm64.exe" -OutFile buildlet.exe
+          Invoke-WebRequest -Uri "https://storage.googleapis.com/go-builder-data/buildlet.windows-arm64" -OutFile buildlet.exe
 
       - name: Run golangbuild and connect as reverse buildlet
         if: env.HAS_LUCI_SA == 'true'
