@@ -35,7 +35,6 @@ jobs:
 
     steps:
       - name: Notify coordinator
-        continue-on-error: true
         shell: pwsh
         env:
           WEBHOOK_SECRET: ${{ secrets.GHA_WEBHOOK_SECRET }}

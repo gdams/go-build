@@ -276,6 +276,21 @@ func (b *GitHubActionsBuildlet) HandleWebhook(w http.ResponseWriter, r *http.Req
 
 	b.mu.Lock()
 	inst, ok := b.active[payload.InstanceName]
+	if !ok {
+		// In dev mode (no webhook secret configured), auto-register
+		// unknown instances so the e2e flow can be tested without
+		// a prior GetBuildlet call.
+		if b.webhookSecret == "" {
+			inst = &ghaInstance{
+				Name:    payload.InstanceName,
+				Created: time.Now(),
+				Status:  "webhook-registered",
+			}
+			b.active[payload.InstanceName] = inst
+			ok = true
+			log.Printf("GitHub Actions webhook: auto-registered instance=%s (dev mode)", payload.InstanceName)
+		}
+	}
 	if ok && payload.RunID != 0 {
 		inst.RunID = payload.RunID
 	}
