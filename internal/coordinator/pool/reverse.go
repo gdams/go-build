@@ -486,7 +486,7 @@ type reverseBuildlet struct {
 
 // HandleReverse handles reverse buildlet connections.
 func HandleReverse(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil {
+	if r.TLS == nil && gceMode != "dev" {
 		http.Error(w, "buildlet registration requires SSL", http.StatusInternalServerError)
 		return
 	}
