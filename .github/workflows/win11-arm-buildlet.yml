@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 120
     env:
       GOMOTEID: ${{ inputs.instance_name }}
+      HAS_LUCI_SA: ${{ secrets.LUCI_SERVICE_ACCOUNT != '' }}
 
     steps:
       - name: Notify coordinator
@@ -87,7 +88,7 @@ jobs:
           .\cipd.exe ensure -root tools -ensure-file cipd_packages.txt
 
       - name: Authenticate with LUCI
-        if: ${{ secrets.LUCI_SERVICE_ACCOUNT != '' }}
+        if: env.HAS_LUCI_SA == 'true'
         shell: pwsh
         env:
           LUCI_SERVICE_ACCOUNT_JSON: ${{ secrets.LUCI_SERVICE_ACCOUNT }}
@@ -109,7 +110,7 @@ jobs:
           Invoke-WebRequest -Uri "$buildletUrl.exe" -OutFile buildlet.exe
 
       - name: Run golangbuild and connect as reverse buildlet
-        if: ${{ secrets.LUCI_SERVICE_ACCOUNT != '' }}
+        if: env.HAS_LUCI_SA == 'true'
         shell: pwsh
         env:
           COORDINATOR: ${{ inputs.coordinator }}
