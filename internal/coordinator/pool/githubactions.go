@@ -246,10 +246,11 @@ func (b *GitHubActionsBuildlet) dispatchWorkflow(ctx context.Context, instName, 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("dispatch returned status %d: %s", resp.StatusCode, string(respBody))
 	}
+	log.Printf("GitHub Actions workflow dispatched for %s (status %d)", instName, resp.StatusCode)
 	return nil
 }
 
