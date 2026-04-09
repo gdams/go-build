@@ -41,6 +41,7 @@ import (
 	"go.chromium.org/luci/auth"
 	buildbucketpb "go.chromium.org/luci/buildbucket/proto"
 	"go.chromium.org/luci/grpc/prpc"
+	"go.chromium.org/luci/hardcoded/chromeinfra"
 	"golang.org/x/build/buildenv"
 	"golang.org/x/build/buildlet"
 	builddash "golang.org/x/build/cmd/coordinator/internal/dashboard"
@@ -376,8 +377,11 @@ func main() {
 			log.Fatalln("luci/auth.NewAuthenticator:", err)
 		}
 	case "dev":
-		luciHTTPClient = http.DefaultClient
-		log.Println("dev mode: using unauthenticated HTTP client for LUCI APIs")
+		var err error
+		luciHTTPClient, err = auth.NewAuthenticator(context.Background(), auth.SilentLogin, chromeinfra.DefaultAuthOptions()).Client()
+		if err != nil {
+			log.Fatalln("luci/auth.NewAuthenticator:", err)
+		}
 	}
 	buildersCl := buildbucketpb.NewBuildersClient(&prpc.Client{
 		C:    luciHTTPClient,
@@ -2361,8 +2365,8 @@ func retrieveSSHKeys(ctx context.Context, sc *secret.Client, m string) (publicKe
 // nopLogger is a no-op implementation of pool.Logger for debug endpoints.
 type nopLogger struct{}
 
-func (nopLogger) LogEventTime(string, ...string)                        {}
-func (nopLogger) CreateSpan(string, ...string) spanlog.Span             { return nopSpan{} }
+func (nopLogger) LogEventTime(string, ...string)            {}
+func (nopLogger) CreateSpan(string, ...string) spanlog.Span { return nopSpan{} }
 
 type nopSpan struct{}
 
