@@ -115,13 +115,16 @@ jobs:
           Get-Item buildlet.exe | Select-Object Name, Length
           Write-Host ""
           Write-Host "=== CIPD tools ==="
-          Get-ChildItem tools -ErrorAction SilentlyContinue | Select-Object Name
+          Get-ChildItem tools -Recurse -Filter *.exe -ErrorAction SilentlyContinue | Select-Object Name, Length
           Write-Host ""
-          Write-Host "=== golangbuild version ==="
-          if (Test-Path tools\golangbuild.exe) {
-            .\tools\golangbuild.exe --version 2>&1 | Write-Host
-          } else {
-            Write-Host "golangbuild not found (CIPD install may have failed)"
+          Write-Host "All tools present:"
+          $expected = @("buildlet.exe", "tools\golangbuild.exe", "tools\luci-auth.exe", "tools\bb.exe", "tools\cipd.exe")
+          foreach ($tool in $expected) {
+            if (Test-Path $tool) {
+              Write-Host "  OK  $tool"
+            } else {
+              Write-Host "  MISSING  $tool"
+            }
           }
 
       - name: Run golangbuild setup
