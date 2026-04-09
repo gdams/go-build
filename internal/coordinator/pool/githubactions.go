@@ -7,7 +7,6 @@
 package pool
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -48,10 +47,8 @@ type GitHubActionsOpt func(*GitHubActionsBuildlet)
 // that starts a Windows 11 ARM runner. The runner connects to LUCI, then executes
 // golangbuild, and finally connects back as a reverse buildlet via the rendezvous system.
 type GitHubActionsBuildlet struct {
-	// httpClient is used to make GitHub API calls.
-	httpClient *http.Client
-	// ghToken is the GitHub personal access token for triggering workflow dispatches.
-	ghToken string
+	// client handles the GitHub API interaction and buildlet connection.
+	client *buildlet.GitHubActionsClient
 	// webhookSecret is the HMAC secret for validating incoming webhook callbacks.
 	webhookSecret string
 	// owner is the GitHub repository owner (e.g., "golang").
@@ -91,8 +88,8 @@ func NewGitHubActionsBuildlet(
 	rdv *rendezvous.Rendezvous,
 	opts ...GitHubActionsOpt,
 ) (*GitHubActionsBuildlet, error) {
+	var ghToken string
 	b := &GitHubActionsBuildlet{
-		httpClient:      http.DefaultClient,
 		hosts:           hosts,
 		rendezvous:      rdv,
 		active:          make(map[string]*ghaInstance),
@@ -109,7 +106,7 @@ func NewGitHubActionsBuildlet(
 	// In dev mode (no secret client), allow env var overrides.
 	if sc == nil {
 		if v := os.Getenv("GHA_GITHUB_TOKEN"); v != "" {
-			b.ghToken = v
+			ghToken = v
 		}
 		if v := os.Getenv("GHA_REPO_OWNER"); v != "" {
 			b.owner = v
@@ -133,13 +130,15 @@ func NewGitHubActionsBuildlet(
 		if err != nil {
 			return nil, fmt.Errorf("github actions pool: unable to retrieve GitHub token: %w", err)
 		}
-		b.ghToken = token
+		ghToken = token
 		whSecret, err := sc.Retrieve(ctx, secret.NameGitHubActionsWebhookSecret)
 		if err != nil {
 			return nil, fmt.Errorf("github actions pool: unable to retrieve webhook secret: %w", err)
 		}
 		b.webhookSecret = whSecret
 	}
+
+	b.client = buildlet.NewGitHubActionsClient(http.DefaultClient, ghToken)
 
 	gitHubActionsBuildlet = b
 	return b, nil
@@ -149,18 +148,12 @@ func NewGitHubActionsBuildlet(
 // buildlet. The workflow connects to LUCI, runs golangbuild setup, and then
 // connects back as a reverse buildlet through the rendezvous system.
 func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
-	hconf, ok := b.hosts[hostType]
-	if !ok {
+	if _, ok := b.hosts[hostType]; !ok {
 		return nil, fmt.Errorf("github actions pool: unknown host type %q", hostType)
 	}
 
 	instName := b.newInstanceName(hostType)
 	log.Printf("Creating GitHub Actions buildlet %q for %s", instName, hostType)
-
-	dispatchSpan := lg.CreateSpan("dispatch_github_actions", instName)
-
-	// Register with rendezvous before dispatching so the runner can connect back.
-	b.rendezvous.RegisterInstance(ctx, instName, 30*time.Minute)
 
 	// Track the instance.
 	b.mu.Lock()
@@ -173,30 +166,27 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 	}
 	b.mu.Unlock()
 
-	// Dispatch the GitHub Actions workflow.
-	if err := b.dispatchWorkflow(ctx, instName, hostType, hconf); err != nil {
-		dispatchSpan.Done(err)
-		b.rendezvous.DeregisterInstance(ctx, instName)
-		b.removeInstance(instName)
-		return nil, fmt.Errorf("github actions pool: dispatch failed for %s: %w", instName, err)
-	}
-	dispatchSpan.Done(nil)
-
-	b.mu.Lock()
-	if inst, ok := b.active[instName]; ok {
-		inst.Status = "running"
-	}
-	b.mu.Unlock()
-
-	log.Printf("GitHub Actions workflow dispatched for %s, waiting for buildlet connection", instName)
-
-	// Wait for the runner to connect back via the rendezvous system.
-	waitSpan := lg.CreateSpan("wait_github_actions_buildlet", instName)
-	bc, err := b.rendezvous.WaitForInstance(ctx, instName)
-	waitSpan.Done(err)
+	dispatchSpan := lg.CreateSpan("dispatch_and_wait_github_actions", instName)
+	bc, err := b.client.StartBuildlet(ctx, instName, hostType, &buildlet.GitHubActionsOpts{
+		Owner:           b.owner,
+		Repo:            b.repo,
+		WorkflowFile:    b.workflowFile,
+		GitRef:          b.gitRef,
+		CoordinatorAddr: b.coordinatorAddr,
+		Waiter:          b.rendezvous,
+		OnWorkflowDispatched: func() {
+			b.mu.Lock()
+			if inst, ok := b.active[instName]; ok {
+				inst.Status = "running"
+			}
+			b.mu.Unlock()
+			log.Printf("GitHub Actions workflow dispatched for %s, waiting for buildlet connection", instName)
+		},
+	})
+	dispatchSpan.Done(err)
 	if err != nil {
 		b.removeInstance(instName)
-		return nil, fmt.Errorf("github actions pool: buildlet connection failed for %s: %w", instName, err)
+		return nil, fmt.Errorf("github actions pool: %s: %w", instName, err)
 	}
 
 	b.mu.Lock()
@@ -212,46 +202,6 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 	})
 	bc.SetInstanceName(instName)
 	return bc, nil
-}
-
-// dispatchWorkflow triggers a GitHub Actions workflow_dispatch event.
-func (b *GitHubActionsBuildlet) dispatchWorkflow(ctx context.Context, instName, hostType string, hconf *dashboard.HostConfig) error {
-	payload := map[string]interface{}{
-		"ref": b.gitRef,
-		"inputs": map[string]string{
-			"instance_name": instName,
-			"host_type":     hostType,
-			"coordinator":   b.coordinatorAddr,
-		},
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal dispatch payload: %w", err)
-	}
-
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/dispatches",
-		b.owner, b.repo, b.workflowFile)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create dispatch request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+b.ghToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("dispatch request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("dispatch returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-	log.Printf("GitHub Actions workflow dispatched for %s (status %d)", instName, resp.StatusCode)
-	return nil
 }
 
 // HandleWebhook handles incoming webhook callbacks from GitHub Actions runners.
