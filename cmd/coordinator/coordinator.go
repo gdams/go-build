@@ -63,6 +63,7 @@ import (
 	"golang.org/x/build/internal/https"
 	"golang.org/x/build/internal/metrics"
 	"golang.org/x/build/internal/migration"
+	"golang.org/x/build/internal/rendezvous"
 	"golang.org/x/build/internal/secret"
 	"golang.org/x/build/kubernetes/gke"
 	"golang.org/x/build/maintner/maintnerd/apipb"
@@ -397,6 +398,14 @@ func main() {
 	gomoteServer := gomote.New(sp, sched, sshCA, gomoteBucket, mustStorageClient())
 	protos.RegisterCoordinatorServer(grpcServer, gs)
 	gomoteprotos.RegisterGomoteServiceServer(grpcServer, gomoteServer)
+
+	// Initialize the GitHub Actions buildlet pool for Windows 11 ARM64 runners.
+	ghaRdv := rendezvous.New(context.Background())
+	ghaPool, err := pool.NewGitHubActionsBuildlet(sc, dashboard.Hosts, ghaRdv)
+	if err != nil {
+		log.Printf("unable to create GitHub Actions buildlet pool: %v", err)
+	}
+
 	mux.HandleFunc("/", grpcHandlerFunc(grpcServer, handleStatus)) // Serve a status page at farmer.golang.org.
 	mux.Handle("build.golang.org/", dashV1)                        // Serve a build dashboard at build.golang.org.
 	mux.Handle("build-staging.golang.org/", dashV1)
@@ -404,6 +413,10 @@ func main() {
 	mux.HandleFunc("/temporarylogs", handleLogs)
 	mux.HandleFunc("/reverse", pool.HandleReverse)
 	mux.Handle("/revdial", revdial.ConnHandler())
+	if ghaPool != nil {
+		mux.HandleFunc("/github-actions/webhook", ghaPool.HandleWebhook)
+		mux.HandleFunc("/github-actions/reverse", ghaRdv.HandleReverse)
+	}
 	mux.HandleFunc("/style.css", handleStyleCSS)
 	mux.HandleFunc("/try", serveTryStatus(false))
 	mux.HandleFunc("/try.json", serveTryStatus(true))

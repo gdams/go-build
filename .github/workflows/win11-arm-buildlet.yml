@@ -1,0 +1,129 @@
+# Copyright 2026 The Go Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+# This workflow is triggered by the coordinator via workflow_dispatch.
+# It provisions a Windows 11 ARM64 runner, connects to LUCI, runs
+# golangbuild, and connects back to the coordinator as a reverse buildlet.
+
+name: Windows 11 ARM Buildlet
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_name:
+        description: 'Unique buildlet instance name assigned by the coordinator'
+        required: true
+        type: string
+      host_type:
+        description: 'Host type from the dashboard config'
+        required: true
+        type: string
+      coordinator:
+        description: 'Coordinator address (host:port)'
+        required: true
+        type: string
+        default: 'farmer.golang.org:443'
+
+jobs:
+  buildlet:
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    env:
+      GOMOTEID: ${{ inputs.instance_name }}
+
+    steps:
+      - name: Notify coordinator
+        shell: pwsh
+        env:
+          WEBHOOK_SECRET: ${{ secrets.GHA_WEBHOOK_SECRET }}
+          COORDINATOR: ${{ inputs.coordinator }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          $body = @{
+            instance_name = $env:INSTANCE_NAME
+            run_id        = [long]$env:RUN_ID
+            status        = "ready"
+          } | ConvertTo-Json -Compress
+
+          $hmac = New-Object System.Security.Cryptography.HMACSHA256
+          $hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($env:WEBHOOK_SECRET)
+          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+          $hash = $hmac.ComputeHash($bodyBytes)
+          $sig = "sha256=" + [System.BitConverter]::ToString($hash).Replace("-", "").ToLower()
+
+          $headers = @{
+            "X-Hub-Signature-256" = $sig
+            "Content-Type"        = "application/json"
+          }
+
+          # Extract host from coordinator address.
+          $coordHost = ($env:COORDINATOR -split ':')[0]
+
+          Invoke-RestMethod `
+            -Uri "https://$coordHost/github-actions/webhook" `
+            -Method Post `
+            -Headers $headers `
+            -Body $body
+
+      - name: Install CIPD tools
+        shell: pwsh
+        run: |
+          $cipdPlatform = "windows-arm64"
+
+          # Download cipd client.
+          $cipdUrl = "https://chrome-infra-packages.appspot.com/client?platform=$cipdPlatform&version=latest"
+          Invoke-WebRequest -Uri $cipdUrl -OutFile cipd.exe
+
+          # Install golangbuild and LUCI tools via CIPD.
+          @"
+          infra/experimental/golangbuild/$cipdPlatform latest
+          infra/tools/luci-auth/$cipdPlatform latest
+          infra/tools/bb/$cipdPlatform latest
+          infra/tools/cipd/$cipdPlatform latest
+          "@ | Out-File -FilePath cipd_packages.txt -Encoding UTF8
+
+          .\cipd.exe ensure -root tools -ensure-file cipd_packages.txt
+
+      - name: Authenticate with LUCI
+        shell: pwsh
+        env:
+          LUCI_SERVICE_ACCOUNT_JSON: ${{ secrets.LUCI_SERVICE_ACCOUNT }}
+        run: |
+          # Write service account credentials to a temp file.
+          $saFile = Join-Path $env:TEMP "luci-sa.json"
+          $env:LUCI_SERVICE_ACCOUNT_JSON | Out-File -FilePath $saFile -Encoding UTF8
+
+          # Authenticate using service account.
+          .\tools\luci-auth login -service-account-json $saFile
+
+          # Clean up credentials file.
+          Remove-Item -Path $saFile -Force
+
+      - name: Download buildlet
+        shell: pwsh
+        run: |
+          $buildletUrl = "https://storage.googleapis.com/go-builder-data/buildlet.windows-arm64"
+          Invoke-WebRequest -Uri "$buildletUrl.exe" -OutFile buildlet.exe
+
+      - name: Run golangbuild and connect as reverse buildlet
+        shell: pwsh
+        env:
+          COORDINATOR: ${{ inputs.coordinator }}
+          INSTANCE_NAME: ${{ inputs.instance_name }}
+          HOST_TYPE: ${{ inputs.host_type }}
+        run: |
+          # Add tools to PATH.
+          $env:PATH = "$(Get-Location)\tools;$env:PATH"
+
+          # Run golangbuild in setup mode, then start the buildlet in reverse mode
+          # to connect back to the coordinator via the rendezvous system.
+          .\tools\golangbuild.exe --mode=setup 2>&1 | Write-Host
+
+          # Start buildlet connecting back to coordinator as a reverse buildlet.
+          .\buildlet.exe `
+            --coordinator=$env:COORDINATOR `
+            --reverse-type=swarming-task `
+            -swarming-bot `
+            -halt=false

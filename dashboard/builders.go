@@ -572,6 +572,11 @@ var Hosts = map[string]*HostConfig{
 		IsReverse: true,
 		ExpectNum: 0, // was 2 before migration to LUCI
 	},
+	"host-windows11-arm64-gha": {
+		Notes:           "Windows 11 ARM64 via GitHub Actions runners",
+		HostArch:        "windows-arm64",
+		IsGitHubActions: true,
+	},
 }
 
 func gh(githubUsername string) *gophers.Person {
@@ -687,6 +692,9 @@ type HostConfig struct {
 
 	// EC2 options
 	IsEC2 bool // if true, the instance is configured to run on EC2
+
+	// GitHub Actions options
+	IsGitHubActions bool // if true, the instance is backed by a GitHub Actions runner
 
 	// GCE or EC2 options:
 	//
@@ -2219,6 +2227,16 @@ func init() {
 			// Note: GOMAXPROCS=4 workaround for go.dev/issue/51019
 			// tentatively removed here, since Azure VMs have 3x more
 			// RAM than the previous win11/arm64 machines.
+		},
+	})
+	addBuilder(BuildConfig{
+		Name:              "windows-arm64-11-gha",
+		HostType:          "host-windows11-arm64-gha",
+		numTryTestHelpers: 1,
+		tryBot:            defaultTrySet(),
+		Notes:             "Windows 11 ARM64 via GitHub Actions, connects to LUCI then runs golangbuild",
+		env: []string{
+			"GOARCH=arm64",
 		},
 	})
 	addBuilder(BuildConfig{
