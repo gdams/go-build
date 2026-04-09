@@ -103,10 +103,19 @@ jobs:
           # Clean up credentials file.
           Remove-Item -Path $saFile -Force
 
-      - name: Download buildlet
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build buildlet from source
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/go-builder-data/buildlet.windows-arm64" -OutFile buildlet.exe
+          go build -o buildlet.exe ./cmd/buildlet/
+          Write-Host "Built buildlet.exe from source"
 
       - name: Verify tools
         shell: pwsh

@@ -115,12 +115,14 @@ func dialCoordinator() (net.Listener, error) {
 
 	success := false
 	location := "/reverse"
+	serverName := strings.TrimSuffix(addr, ":443")
 	const maxRedirects = 2
 	for range maxRedirects {
 		req, err := http.NewRequest("GET", location, nil)
 		if err != nil {
 			log.Fatal(err)
 		}
+		req.Host = serverName
 		req.Header.Set("X-Go-Host-Type", *reverseType)
 		req.Header.Set("X-Go-Builder-Key", key)
 		req.Header.Set("X-Go-Builder-Hostname", *hostname)
