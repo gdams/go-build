@@ -34,6 +34,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -99,6 +100,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/github-actions/webhook", mc.handleWebhook)
 	mux.HandleFunc("/github-actions/reverse", mc.handleReverse)
+	mux.HandleFunc("/reverse", mc.handleBuildletReverse)
+	mux.HandleFunc("/revdial", mc.handleRevdial)
 	mux.HandleFunc("/", mc.handleStatus)
 
 	srv := &http.Server{
@@ -305,6 +308,105 @@ func (mc *mockCoordinator) handleReverse(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+}
+
+// handleBuildletReverse handles the standard /reverse endpoint that the
+// buildlet binary connects to in reverse mode. It validates the dev builder
+// key and responds with 101 Switching Protocols.
+func (mc *mockCoordinator) handleBuildletReverse(w http.ResponseWriter, r *http.Request) {
+	hostType := r.Header.Get("X-Go-Host-Type")
+	builderKey := r.Header.Get("X-Go-Builder-Key")
+	hostname := r.Header.Get("X-Go-Builder-Hostname")
+	version := r.Header.Get("X-Go-Builder-Version")
+
+	mc.emit("BUILDLET", fmt.Sprintf("Reverse connection — hostType=%s hostname=%s version=%s remote=%s",
+		hostType, hostname, version, r.RemoteAddr))
+
+	// Validate the dev builder key.
+	expectedKey := devBuilderKey(hostType)
+	if builderKey != expectedKey {
+		mc.emit("BUILDLET", fmt.Sprintf("ERROR invalid key for %s (got %s, want %s)", hostType, builderKey, expectedKey))
+		http.Error(w, "invalid builder key", http.StatusForbidden)
+		return
+	}
+	mc.emit("BUILDLET", "Builder key validated OK")
+
+	mc.mu.Lock()
+	mc.buildletConn = true
+	mc.mu.Unlock()
+
+	// Hijack the connection and send 101 Switching Protocols.
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		mc.emit("BUILDLET", "ERROR server doesn't support hijacking")
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return
+	}
+
+	conn, bufrw, err := hj.Hijack()
+	if err != nil {
+		mc.emit("BUILDLET", fmt.Sprintf("ERROR hijack failed: %v", err))
+		return
+	}
+
+	// Write the 101 response the buildlet expects.
+	fmt.Fprintf(bufrw, "HTTP/1.1 101 Switching Protocols\r\n\r\n")
+	bufrw.Flush()
+
+	mc.emit("BUILDLET", fmt.Sprintf("SUCCESS — Buildlet %s connected and protocol switched!", hostname))
+	mc.emit("BUILDLET", "Connection is live — buildlet is ready to accept work")
+	mc.emit("BUILDLET", "Holding connection open (Ctrl+C to stop)...")
+
+	// Hold the connection open. In a real coordinator, revdial
+	// would multiplex HTTP requests over this connection.
+	buf := make([]byte, 256)
+	for {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		n, err := conn.Read(buf)
+		if err != nil {
+			mc.emit("BUILDLET", fmt.Sprintf("Connection ended: %v", err))
+			conn.Close()
+			return
+		}
+		if n > 0 {
+			mc.emit("BUILDLET", fmt.Sprintf("Received %d bytes from buildlet", n))
+		}
+	}
+}
+
+// handleRevdial handles the /revdial endpoint used by revdial v2.
+func (mc *mockCoordinator) handleRevdial(w http.ResponseWriter, r *http.Request) {
+	mc.emit("REVDIAL", fmt.Sprintf("Revdial connection from %s", r.RemoteAddr))
+	// For mock purposes, just hold the connection.
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	conn, _, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	mc.emit("REVDIAL", "Connection established")
+	buf := make([]byte, 256)
+	for {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_, err := conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			return
+		}
+	}
+}
+
+// devBuilderKey generates the same dev key as the buildlet binary.
+// Uses HMAC-MD5 with "gophers rule" as the master key.
+const devMasterKey = "gophers rule"
+
+func devBuilderKey(builder string) string {
+	h := hmac.New(md5.New, []byte(devMasterKey))
+	io.WriteString(h, builder)
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func (mc *mockCoordinator) validateHMAC(body []byte, signature string) bool {

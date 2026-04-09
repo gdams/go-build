@@ -108,24 +108,47 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://storage.googleapis.com/go-builder-data/buildlet.windows-arm64" -OutFile buildlet.exe
 
-      - name: Run golangbuild and connect as reverse buildlet
+      - name: Verify tools
+        shell: pwsh
+        run: |
+          Write-Host "=== Buildlet ==="
+          Get-Item buildlet.exe | Select-Object Name, Length
+          Write-Host ""
+          Write-Host "=== CIPD tools ==="
+          Get-ChildItem tools -ErrorAction SilentlyContinue | Select-Object Name
+          Write-Host ""
+          Write-Host "=== golangbuild version ==="
+          if (Test-Path tools\golangbuild.exe) {
+            .\tools\golangbuild.exe --version 2>&1 | Write-Host
+          } else {
+            Write-Host "golangbuild not found (CIPD install may have failed)"
+          }
+
+      - name: Run golangbuild setup
         if: env.HAS_LUCI_SA == 'true'
         shell: pwsh
+        run: |
+          $env:PATH = "$(Get-Location)\tools;$env:PATH"
+          .\tools\golangbuild.exe --mode=setup 2>&1 | Write-Host
+
+      - name: Connect buildlet to coordinator
+        shell: pwsh
+        timeout-minutes: 2
         env:
           COORDINATOR: ${{ inputs.coordinator }}
           INSTANCE_NAME: ${{ inputs.instance_name }}
           HOST_TYPE: ${{ inputs.host_type }}
         run: |
-          # Add tools to PATH.
-          $env:PATH = "$(Get-Location)\tools;$env:PATH"
+          Write-Host "Connecting buildlet to coordinator at $env:COORDINATOR ..."
+          Write-Host "Instance: $env:INSTANCE_NAME"
+          Write-Host "Host type: $env:HOST_TYPE"
 
-          # Run golangbuild in setup mode, then start the buildlet in reverse mode
-          # to connect back to the coordinator via the rendezvous system.
-          .\tools\golangbuild.exe --mode=setup 2>&1 | Write-Host
+          # Set dev mode env so buildlet skips TLS verification
+          # and uses a dev key (for testing with mock coordinator).
+          $env:GO_BUILDER_ENV = "host-go-builder0"
 
-          # Start buildlet connecting back to coordinator as a reverse buildlet.
           .\buildlet.exe `
             --coordinator=$env:COORDINATOR `
-            --reverse-type=swarming-task `
-            -swarming-bot `
+            --reverse-type=$env:HOST_TYPE `
+            --hostname=$env:INSTANCE_NAME `
             -halt=false
