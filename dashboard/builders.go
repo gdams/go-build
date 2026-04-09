@@ -575,6 +575,7 @@ var Hosts = map[string]*HostConfig{
 	"host-windows11-arm64-gha": {
 		Notes:           "Windows 11 ARM64 via GitHub Actions runners",
 		HostArch:        "windows-arm64",
+		IsReverse:       true, // connects back as a reverse buildlet
 		IsGitHubActions: true,
 	},
 }

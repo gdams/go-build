@@ -41,7 +41,6 @@ import (
 	"go.chromium.org/luci/auth"
 	buildbucketpb "go.chromium.org/luci/buildbucket/proto"
 	"go.chromium.org/luci/grpc/prpc"
-	"go.chromium.org/luci/hardcoded/chromeinfra"
 	"golang.org/x/build/buildenv"
 	"golang.org/x/build/buildlet"
 	builddash "golang.org/x/build/cmd/coordinator/internal/dashboard"
@@ -376,11 +375,8 @@ func main() {
 			log.Fatalln("luci/auth.NewAuthenticator:", err)
 		}
 	case "dev":
-		var err error
-		luciHTTPClient, err = auth.NewAuthenticator(context.Background(), auth.SilentLogin, chromeinfra.DefaultAuthOptions()).Client()
-		if err != nil {
-			log.Fatalln("luci/auth.NewAuthenticator:", err)
-		}
+		luciHTTPClient = http.DefaultClient
+		log.Println("dev mode: using unauthenticated HTTP client for LUCI APIs")
 	}
 	buildersCl := buildbucketpb.NewBuildersClient(&prpc.Client{
 		C:    luciHTTPClient,
