@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,10 @@ type GitHubActionsBuildlet struct {
 	repo string
 	// workflowFile is the workflow filename to dispatch (e.g., "win11-arm-buildlet.yml").
 	workflowFile string
+	// gitRef is the git ref (branch) to dispatch the workflow on.
+	gitRef string
+	// coordinatorAddr is the address the workflow runner should connect back to.
+	coordinatorAddr string
 	// hosts provides the host configuration for all hosts.
 	hosts map[string]*dashboard.HostConfig
 	// rendezvous coordinates buildlet connections.
@@ -87,16 +92,37 @@ func NewGitHubActionsBuildlet(
 	opts ...GitHubActionsOpt,
 ) (*GitHubActionsBuildlet, error) {
 	b := &GitHubActionsBuildlet{
-		httpClient:   http.DefaultClient,
-		hosts:        hosts,
-		rendezvous:   rdv,
-		active:       make(map[string]*ghaInstance),
-		owner:        "golang",
-		repo:         "build",
-		workflowFile: "win11-arm-buildlet.yml",
+		httpClient:      http.DefaultClient,
+		hosts:           hosts,
+		rendezvous:      rdv,
+		active:          make(map[string]*ghaInstance),
+		owner:           "golang",
+		repo:            "build",
+		workflowFile:    "win11-arm-buildlet.yml",
+		gitRef:          "main",
+		coordinatorAddr: "farmer.golang.org:443",
 	}
 	for _, opt := range opts {
 		opt(b)
+	}
+
+	// In dev mode (no secret client), allow env var overrides.
+	if sc == nil {
+		if v := os.Getenv("GHA_GITHUB_TOKEN"); v != "" {
+			b.ghToken = v
+		}
+		if v := os.Getenv("GHA_REPO_OWNER"); v != "" {
+			b.owner = v
+		}
+		if v := os.Getenv("GHA_REPO_NAME"); v != "" {
+			b.repo = v
+		}
+		if v := os.Getenv("GHA_GIT_REF"); v != "" {
+			b.gitRef = v
+		}
+		if v := os.Getenv("GHA_COORDINATOR_ADDR"); v != "" {
+			b.coordinatorAddr = v
+		}
 	}
 
 	// Retrieve secrets if a secret client is available.
@@ -191,11 +217,11 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 // dispatchWorkflow triggers a GitHub Actions workflow_dispatch event.
 func (b *GitHubActionsBuildlet) dispatchWorkflow(ctx context.Context, instName, hostType string, hconf *dashboard.HostConfig) error {
 	payload := map[string]interface{}{
-		"ref": "main",
+		"ref": b.gitRef,
 		"inputs": map[string]string{
 			"instance_name": instName,
 			"host_type":     hostType,
-			"coordinator":   "gomotessh.golang.org:443",
+			"coordinator":   b.coordinatorAddr,
 		},
 	}
 	body, err := json.Marshal(payload)

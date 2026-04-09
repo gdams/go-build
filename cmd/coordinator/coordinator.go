@@ -64,6 +64,7 @@ import (
 	"golang.org/x/build/internal/migration"
 	"golang.org/x/build/internal/rendezvous"
 	"golang.org/x/build/internal/secret"
+	"golang.org/x/build/internal/spanlog"
 	"golang.org/x/build/kubernetes/gke"
 	"golang.org/x/build/maintner/maintnerd/apipb"
 	"golang.org/x/build/repos"
@@ -420,6 +421,34 @@ func main() {
 	mux.Handle("/dashboard", dashV2)
 	mux.HandleFunc("/queues", handleQueues)
 	if *mode == "dev" {
+		if ghaPool != nil {
+			mux.HandleFunc("/debug/request-gha-buildlet", func(w http.ResponseWriter, r *http.Request) {
+				hostType := r.FormValue("host")
+				if hostType == "" {
+					hostType = "host-windows11-arm64-gha"
+				}
+				log.Printf("debug: requesting GHA buildlet for %s", hostType)
+				w.Header().Set("Content-Type", "text/plain")
+				fmt.Fprintf(w, "Requesting GHA buildlet for %s...\n", hostType)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+					defer cancel()
+					bc, err := ghaPool.GetBuildlet(ctx, hostType, nopLogger{}, &queue.SchedItem{
+						HostType:    hostType,
+						RequestTime: time.Now(),
+					})
+					if err != nil {
+						log.Printf("debug: GHA buildlet request failed: %v", err)
+						return
+					}
+					log.Printf("debug: GHA buildlet connected! %s", bc.String())
+				}()
+				fmt.Fprintf(w, "Dispatched! Watch coordinator logs for progress.\n")
+			})
+		}
 		// TODO(crawshaw): do more in dev mode
 		gce.BuildletPool().SetEnabled(*devEnableGCE)
 		if *devEnableGCE || *devEnableEC2 {
@@ -2328,3 +2357,13 @@ func retrieveSSHKeys(ctx context.Context, sc *secret.Client, m string) (publicKe
 	}
 	return nil, nil, fmt.Errorf("unable to retrieve ssh keys")
 }
+
+// nopLogger is a no-op implementation of pool.Logger for debug endpoints.
+type nopLogger struct{}
+
+func (nopLogger) LogEventTime(string, ...string)                        {}
+func (nopLogger) CreateSpan(string, ...string) spanlog.Span             { return nopSpan{} }
+
+type nopSpan struct{}
+
+func (nopSpan) Done(error) error { return nil }
