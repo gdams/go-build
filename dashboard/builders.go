@@ -576,9 +576,9 @@ var Hosts = map[string]*HostConfig{
 		Notes:                 "Windows 11 ARM64 via GitHub Actions runners",
 		HostArch:              "windows-arm64",
 		IsReverse:             true, // connects back as a reverse buildlet
-		IsGitHubActions:       true,
-		GitHubActionsRepo:     "golang/build@main",
-		GitHubActionsWorkflow: "win11-arm-buildlet.yml",
+		IsGHA:       true,
+		GHARepo:     "golang/build@main",
+		GHAWorkflow: "win11-arm-buildlet.yml",
 	},
 }
 
@@ -697,9 +697,9 @@ type HostConfig struct {
 	IsEC2 bool // if true, the instance is configured to run on EC2
 
 	// GitHub Actions options
-	IsGitHubActions      bool   // if true, the instance is backed by a GitHub Actions runner
-	GitHubActionsRepo    string // GitHub repository in "owner/repo@ref" format (e.g. "golang/build@main")
-	GitHubActionsWorkflow string // workflow filename to dispatch (e.g. "win11-arm-buildlet.yml")
+	IsGHA      bool   // if true, the instance is backed by a GitHub Actions runner
+	GHARepo    string // GitHub repository in "owner/repo@ref" format (e.g. "golang/build@main")
+	GHAWorkflow string // workflow filename to dispatch (e.g. "win11-arm-buildlet.yml")
 
 	// GCE or EC2 options:
 	//

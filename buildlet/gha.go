@@ -32,18 +32,18 @@ type BuildletWaiter interface {
 	DeregisterInstance(ctx context.Context, id string)
 }
 
-// GitHubActionsClient is the client used to create buildlets via GitHub Actions
+// GHAClient is the client used to create buildlets via GitHub Actions
 // workflow_dispatch events. It mirrors the pattern of EC2Client: a thin wrapper
 // around a cloud API that dispatches work and returns a connected Client.
-type GitHubActionsClient struct {
+type GHAClient struct {
 	client *ghAPIClient
 }
 
-// NewGitHubActionsClient creates a new GitHubActionsClient that authenticates
+// NewGHAClient creates a new GHAClient that authenticates
 // using a static token. This is intended for development and testing.
-func NewGitHubActionsClient(httpClient *http.Client, token string) *GitHubActionsClient {
+func NewGHAClient(httpClient *http.Client, token string) *GHAClient {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	return &GitHubActionsClient{
+	return &GHAClient{
 		client: &ghAPIClient{
 			httpClient: &http.Client{
 				Transport: &oauth2.Transport{
@@ -56,11 +56,11 @@ func NewGitHubActionsClient(httpClient *http.Client, token string) *GitHubAction
 	}
 }
 
-// NewGitHubActionsClientFromApp creates a new GitHubActionsClient that
+// NewGHAClientFromApp creates a new GHAClient that
 // authenticates as a GitHub App. It generates short-lived installation
 // tokens on demand using the app's private key. The installation ID
 // for each target repository is resolved dynamically.
-func NewGitHubActionsClientFromApp(httpClient *http.Client, clientID int64, privateKeyPEM []byte) (*GitHubActionsClient, error) {
+func NewGHAClientFromApp(httpClient *http.Client, clientID int64, privateKeyPEM []byte) (*GHAClient, error) {
 	block, _ := pem.Decode(privateKeyPEM)
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode PEM block from private key")
@@ -69,7 +69,7 @@ func NewGitHubActionsClientFromApp(httpClient *http.Client, clientID int64, priv
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
-	return &GitHubActionsClient{
+	return &GHAClient{
 		client: &ghAPIClient{
 			httpClient: httpClient,
 			clientID:   clientID,
@@ -80,8 +80,8 @@ func NewGitHubActionsClientFromApp(httpClient *http.Client, clientID int64, priv
 	}, nil
 }
 
-// GitHubActionsOpts contains options for dispatching a GitHub Actions buildlet.
-type GitHubActionsOpts struct {
+// GHAOpts contains options for dispatching a GitHub Actions buildlet.
+type GHAOpts struct {
 	// Repo is the GitHub repository in "owner/repo@ref" format
 	// (e.g. "golang/build@main").
 	Repo string
@@ -102,7 +102,7 @@ type GitHubActionsOpts struct {
 
 // StartBuildlet dispatches a GitHub Actions workflow to provision a buildlet
 // and waits for the runner to connect back as a reverse buildlet via the waiter.
-func (c *GitHubActionsClient) StartBuildlet(ctx context.Context, instName, hostType string, opts *GitHubActionsOpts) (Client, error) {
+func (c *GHAClient) StartBuildlet(ctx context.Context, instName, hostType string, opts *GHAOpts) (Client, error) {
 	if opts == nil {
 		return nil, fmt.Errorf("options must be set")
 	}
@@ -159,7 +159,7 @@ func parseRepo(s string) (owner, repo, ref string, err error) {
 	return ownerRepo[0], ownerRepo[1], ref, nil
 }
 
-// ghAPIClient implements gitHubActionsAPI using the go-github library.
+// ghAPIClient implements ghaAPI using the go-github library.
 // In static token mode (privateKey is nil), httpClient already carries
 // the oauth2 transport and a single github.Client is cached.
 // In GitHub App mode (privateKey is set), it dynamically resolves

@@ -114,9 +114,9 @@ const (
 	// Marketplace publisher key.
 	NameVSCodeMarketplacePublishToken = "vscode-marketplace-token"
 
-	// NameGitHubActionsAppPrivateKey is the secret name for the GitHub App
+	// NameGHAAppPrivateKey is the secret name for the GitHub App
 	// private key (PEM-encoded) used to sign JWTs for installation token generation.
-	NameGitHubActionsAppPrivateKey = "github-actions-app-private-key"
+	NameGHAAppPrivateKey = "github-actions-app-private-key"
 )
 
 type BlueskyCredentials struct {

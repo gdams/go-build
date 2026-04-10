@@ -46,13 +46,13 @@ func (h *fakeDispatchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(code)
 }
 
-// newTestGHClient creates a GitHubActionsClient backed by a test HTTP server.
+// newTestGHClient creates a GHAClient backed by a test HTTP server.
 // The handler is called for all dispatch requests.
-func newTestGHClient(t *testing.T, handler http.Handler) *GitHubActionsClient {
+func newTestGHClient(t *testing.T, handler http.Handler) *GHAClient {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	c := NewGitHubActionsClient(srv.Client(), "test-token")
+	c := NewGHAClient(srv.Client(), "test-token")
 	c.client.apiBaseURL = srv.URL
 	// Re-init clients map so the cached client picks up apiBaseURL.
 	c.client.clients = make(map[int64]*github.Client)
@@ -90,7 +90,7 @@ func (f *fakeBuildletWaiter) DeregisterInstance(ctx context.Context, id string) 
 	f.deregistered[id] = true
 }
 
-func TestGitHubActionsStartBuildlet(t *testing.T) {
+func TestGHAStartBuildlet(t *testing.T) {
 	waiter := newFakeBuildletWaiter()
 	waiter.waitClient = &FakeClient{}
 
@@ -98,7 +98,7 @@ func TestGitHubActionsStartBuildlet(t *testing.T) {
 	c := newTestGHClient(t, handler)
 
 	dispatched := false
-	opts := &GitHubActionsOpts{
+	opts := &GHAOpts{
 		Repo:            "golang/build@main",
 		WorkflowFile:    "test.yml",
 		CoordinatorAddr: "localhost:443",
@@ -139,12 +139,12 @@ func TestGitHubActionsStartBuildlet(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsStartBuildletError(t *testing.T) {
+func TestGHAStartBuildletError(t *testing.T) {
 	testCases := []struct {
 		desc     string
 		instName string
 		hostType string
-		opts     *GitHubActionsOpts
+		opts     *GHAOpts
 	}{
 		{
 			desc:     "nil-opts",
@@ -156,7 +156,7 @@ func TestGitHubActionsStartBuildletError(t *testing.T) {
 			desc:     "nil-waiter",
 			instName: "inst-1",
 			hostType: "host-test",
-			opts: &GitHubActionsOpts{
+			opts: &GHAOpts{
 				Repo: "golang/build@main",
 			},
 		},
@@ -164,7 +164,7 @@ func TestGitHubActionsStartBuildletError(t *testing.T) {
 			desc:     "empty-instName",
 			instName: "",
 			hostType: "host-test",
-			opts: &GitHubActionsOpts{
+			opts: &GHAOpts{
 				Waiter: newFakeBuildletWaiter(),
 			},
 		},
@@ -172,7 +172,7 @@ func TestGitHubActionsStartBuildletError(t *testing.T) {
 			desc:     "empty-hostType",
 			instName: "inst-1",
 			hostType: "",
-			opts: &GitHubActionsOpts{
+			opts: &GHAOpts{
 				Waiter: newFakeBuildletWaiter(),
 			},
 		},
@@ -188,12 +188,12 @@ func TestGitHubActionsStartBuildletError(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsDispatchError(t *testing.T) {
+func TestGHADispatchError(t *testing.T) {
 	waiter := newFakeBuildletWaiter()
 	handler := &fakeDispatchHandler{statusCode: http.StatusInternalServerError}
 	c := newTestGHClient(t, handler)
 
-	opts := &GitHubActionsOpts{
+	opts := &GHAOpts{
 		Repo:         "golang/build@main",
 		WorkflowFile: "test.yml",
 		Waiter:       waiter,
@@ -209,14 +209,14 @@ func TestGitHubActionsDispatchError(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsWaitError(t *testing.T) {
+func TestGHAWaitError(t *testing.T) {
 	waiter := newFakeBuildletWaiter()
 	waiter.waitErr = errors.New("connection timeout")
 
 	handler := &fakeDispatchHandler{}
 	c := newTestGHClient(t, handler)
 
-	opts := &GitHubActionsOpts{
+	opts := &GHAOpts{
 		Repo:         "golang/build@main",
 		WorkflowFile: "test.yml",
 		Waiter:       waiter,
@@ -231,13 +231,13 @@ func TestGitHubActionsWaitError(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsDefaultTimeout(t *testing.T) {
+func TestGHADefaultTimeout(t *testing.T) {
 	waiter := newFakeBuildletWaiter()
 	waiter.waitClient = &FakeClient{}
 
 	c := newTestGHClient(t, &fakeDispatchHandler{})
 
-	opts := &GitHubActionsOpts{
+	opts := &GHAOpts{
 		Repo:         "golang/build@main",
 		WorkflowFile: "test.yml",
 		Waiter:       waiter,
@@ -252,13 +252,13 @@ func TestGitHubActionsDefaultTimeout(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsCustomTimeout(t *testing.T) {
+func TestGHACustomTimeout(t *testing.T) {
 	waiter := newFakeBuildletWaiter()
 	waiter.waitClient = &FakeClient{}
 
 	c := newTestGHClient(t, &fakeDispatchHandler{})
 
-	opts := &GitHubActionsOpts{
+	opts := &GHAOpts{
 		Repo:                "golang/build@main",
 		WorkflowFile:        "test.yml",
 		Waiter:              waiter,
@@ -286,19 +286,19 @@ func testPrivateKeyPEM(t *testing.T) []byte {
 	})
 }
 
-func TestNewGitHubActionsClientFromApp(t *testing.T) {
+func TestNewGHAClientFromApp(t *testing.T) {
 	keyPEM := testPrivateKeyPEM(t)
-	client, err := NewGitHubActionsClientFromApp(http.DefaultClient, 12345, keyPEM)
+	client, err := NewGHAClientFromApp(http.DefaultClient, 12345, keyPEM)
 	if err != nil {
-		t.Fatalf("NewGitHubActionsClientFromApp: %v", err)
+		t.Fatalf("NewGHAClientFromApp: %v", err)
 	}
 	if client == nil {
 		t.Fatal("expected non-nil client")
 	}
 }
 
-func TestNewGitHubActionsClientFromAppInvalidKey(t *testing.T) {
-	_, err := NewGitHubActionsClientFromApp(http.DefaultClient, 12345, []byte("not a pem key"))
+func TestNewGHAClientFromAppInvalidKey(t *testing.T) {
+	_, err := NewGHAClientFromApp(http.DefaultClient, 12345, []byte("not a pem key"))
 	if err == nil {
 		t.Fatal("expected error for invalid PEM key")
 	}

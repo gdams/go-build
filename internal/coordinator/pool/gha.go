@@ -25,30 +25,30 @@ import (
 	"golang.org/x/build/internal/secret"
 )
 
-var _ Buildlet = (*GitHubActionsBuildlet)(nil)
+var _ Buildlet = (*GHABuildlet)(nil)
 
-// gitHubActionsClientID is the GitHub App client ID for the coordinator's
+// ghaClientID is the GitHub App client ID for the coordinator's
 // GitHub App used to dispatch workflow_dispatch events.
-const gitHubActionsClientID = 0 // TODO: set to the actual GitHub App client ID
+const ghaClientID = 0 // TODO: set to the actual GitHub App client ID
 
-// gitHubActionsBuildlet is the package level GitHub Actions buildlet pool.
-var gitHubActionsBuildlet *GitHubActionsBuildlet
+// ghaBuildlet is the package level GitHub Actions buildlet pool.
+var ghaBuildlet *GHABuildlet
 
-// GitHubActionsPool retrieves the package level GitHubActionsBuildlet pool.
-func GitHubActionsPool() *GitHubActionsBuildlet {
-	return gitHubActionsBuildlet
+// GHAPool retrieves the package level GHABuildlet pool.
+func GHAPool() *GHABuildlet {
+	return ghaBuildlet
 }
 
-// GitHubActionsOpt is optional configuration for the GitHub Actions buildlet pool.
-type GitHubActionsOpt func(*GitHubActionsBuildlet)
+// GHAOpt is optional configuration for the GitHub Actions buildlet pool.
+type GHAOpt func(*GHABuildlet)
 
-// GitHubActionsBuildlet manages a pool of buildlets backed by GitHub Actions runners.
+// GHABuildlet manages a pool of buildlets backed by GitHub Actions runners.
 // When a buildlet is requested, it triggers a GitHub Actions workflow_dispatch event
-// that starts a Windows 11 ARM runner. The runner connects to LUCI, then executes
+// that starts a GitHub Actions runner. The runner connects to LUCI, then executes
 // golangbuild, and finally connects back as a reverse buildlet via the rendezvous system.
-type GitHubActionsBuildlet struct {
+type GHABuildlet struct {
 	// client handles the GitHub API interaction and buildlet connection.
-	client *buildlet.GitHubActionsClient
+	client *buildlet.GHAClient
 	// coordinatorAddr is the address the workflow runner should connect back to.
 	coordinatorAddr string
 	// hosts provides the host configuration for all hosts.
@@ -71,14 +71,14 @@ type ghaInstance struct {
 	WorkflowS string // workflow file that was dispatched
 }
 
-// NewGitHubActionsBuildlet creates a new GitHub Actions buildlet pool.
-func NewGitHubActionsBuildlet(
+// NewGHABuildlet creates a new GitHub Actions buildlet pool.
+func NewGHABuildlet(
 	sc *secret.Client,
 	hosts map[string]*dashboard.HostConfig,
 	rdv *rendezvous.Rendezvous,
-	opts ...GitHubActionsOpt,
-) (*GitHubActionsBuildlet, error) {
-	b := &GitHubActionsBuildlet{
+	opts ...GHAOpt,
+) (*GHABuildlet, error) {
+	b := &GHABuildlet{
 		hosts:           hosts,
 		rendezvous:      rdv,
 		active:          make(map[string]*ghaInstance),
@@ -95,32 +95,32 @@ func NewGitHubActionsBuildlet(
 		if v := os.Getenv("GHA_COORDINATOR_ADDR"); v != "" {
 			b.coordinatorAddr = v
 		}
-		b.client = buildlet.NewGitHubActionsClient(http.DefaultClient, ghToken)
-		gitHubActionsBuildlet = b
+		b.client = buildlet.NewGHAClient(http.DefaultClient, ghToken)
+		ghaBuildlet = b
 		return b, nil
 	}
 
 	// Production: authenticate as a GitHub App.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	privateKey, err := sc.Retrieve(ctx, secret.NameGitHubActionsAppPrivateKey)
+	privateKey, err := sc.Retrieve(ctx, secret.NameGHAAppPrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("github actions pool: unable to retrieve app private key: %w", err)
 	}
-	client, err := buildlet.NewGitHubActionsClientFromApp(http.DefaultClient, gitHubActionsClientID, []byte(privateKey))
+	client, err := buildlet.NewGHAClientFromApp(http.DefaultClient, ghaClientID, []byte(privateKey))
 	if err != nil {
 		return nil, fmt.Errorf("github actions pool: %w", err)
 	}
 	b.client = client
 
-	gitHubActionsBuildlet = b
+	ghaBuildlet = b
 	return b, nil
 }
 
 // GetBuildlet triggers a GitHub Actions workflow to provision a Windows 11 ARM
 // buildlet. The workflow connects to LUCI, runs golangbuild setup, and then
 // connects back as a reverse buildlet through the rendezvous system.
-func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
+func (b *GHABuildlet) GetBuildlet(ctx context.Context, hostType string, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
 	hconf, ok := b.hosts[hostType]
 	if !ok {
 		return nil, fmt.Errorf("github actions pool: unknown host type %q", hostType)
@@ -136,14 +136,14 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 		HostType:  hostType,
 		Created:   time.Now(),
 		Status:    "dispatching",
-		WorkflowS: hconf.GitHubActionsWorkflow,
+		WorkflowS: hconf.GHAWorkflow,
 	}
 	b.mu.Unlock()
 
 	dispatchSpan := lg.CreateSpan("dispatch_and_wait_github_actions", instName)
-	bc, err := b.client.StartBuildlet(ctx, instName, hostType, &buildlet.GitHubActionsOpts{
-		Repo:            hconf.GitHubActionsRepo,
-		WorkflowFile:    hconf.GitHubActionsWorkflow,
+	bc, err := b.client.StartBuildlet(ctx, instName, hostType, &buildlet.GHAOpts{
+		Repo:            hconf.GHARepo,
+		WorkflowFile:    hconf.GHAWorkflow,
 		CoordinatorAddr: b.coordinatorAddr,
 		Waiter:          b.rendezvous,
 		OnWorkflowDispatched: func() {
@@ -177,7 +177,7 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 }
 
 // String gives a report of capacity usage for the GitHub Actions buildlet pool.
-func (b *GitHubActionsBuildlet) String() string {
+func (b *GHABuildlet) String() string {
 	b.mu.Lock()
 	n := len(b.active)
 	b.mu.Unlock()
@@ -185,7 +185,7 @@ func (b *GitHubActionsBuildlet) String() string {
 }
 
 // WriteHTMLStatus writes the status of the GitHub Actions buildlet pool to an io.Writer.
-func (b *GitHubActionsBuildlet) WriteHTMLStatus(w io.Writer) {
+func (b *GHABuildlet) WriteHTMLStatus(w io.Writer) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	fmt.Fprintf(w, "<b>GitHub Actions pool</b>: %d active instances", len(b.active))
@@ -205,19 +205,19 @@ func (b *GitHubActionsBuildlet) WriteHTMLStatus(w io.Writer) {
 }
 
 // buildletDone marks an instance as done and removes it from tracking.
-func (b *GitHubActionsBuildlet) buildletDone(instName string) {
+func (b *GHABuildlet) buildletDone(instName string) {
 	b.removeInstance(instName)
 }
 
 // removeInstance removes an instance from the active tracking map.
-func (b *GitHubActionsBuildlet) removeInstance(instName string) {
+func (b *GHABuildlet) removeInstance(instName string) {
 	b.mu.Lock()
 	delete(b.active, instName)
 	b.mu.Unlock()
 }
 
 // newInstanceName generates a unique instance name for the given host type.
-func (b *GitHubActionsBuildlet) newInstanceName(hostType string) string {
+func (b *GHABuildlet) newInstanceName(hostType string) string {
 	b.mu.Lock()
 	b.startSeq++
 	seq := b.startSeq
