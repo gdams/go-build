@@ -22,7 +22,6 @@ import (
 	"golang.org/x/build/buildlet"
 	"golang.org/x/build/dashboard"
 	"golang.org/x/build/internal/coordinator/pool/queue"
-	"golang.org/x/build/internal/rendezvous"
 	"golang.org/x/build/internal/secret"
 )
 
@@ -42,7 +41,7 @@ type GHAOpt func(*GHABuildlet)
 // GHABuildlet manages a pool of buildlets backed by GitHub Actions runners.
 // When a buildlet is requested, it triggers a GitHub Actions workflow_dispatch event
 // that starts a GitHub Actions runner. The runner connects to LUCI, then executes
-// golangbuild, and finally connects back as a reverse buildlet via the rendezvous system.
+// golangbuild, and finally connects back as a reverse buildlet.
 type GHABuildlet struct {
 	// client handles the GitHub API interaction and buildlet connection.
 	client *buildlet.GHAClient
@@ -50,8 +49,6 @@ type GHABuildlet struct {
 	coordinatorAddr string
 	// hosts provides the host configuration for all hosts.
 	hosts map[string]*dashboard.HostConfig
-	// rendezvous coordinates buildlet connections.
-	rendezvous *rendezvous.Rendezvous
 
 	mu       sync.Mutex
 	active   map[string]*ghaInstance // keyed by instance name
@@ -73,12 +70,10 @@ func NewGHABuildlet(
 	buildEnv *buildenv.Environment,
 	sc *secret.Client,
 	hosts map[string]*dashboard.HostConfig,
-	rdv *rendezvous.Rendezvous,
 	opts ...GHAOpt,
 ) (*GHABuildlet, error) {
 	b := &GHABuildlet{
 		hosts:           hosts,
-		rendezvous:      rdv,
 		active:          make(map[string]*ghaInstance),
 		coordinatorAddr: "farmer.golang.org:443",
 	}
@@ -115,9 +110,10 @@ func NewGHABuildlet(
 	return b, nil
 }
 
-// GetBuildlet triggers a GitHub Actions workflow to provision a Windows 11 ARM
-// buildlet. The workflow connects to LUCI, runs golangbuild setup, and then
-// connects back as a reverse buildlet through the rendezvous system.
+// GetBuildlet triggers a GitHub Actions workflow to provision a buildlet.
+// The workflow connects back as a reverse buildlet through the standard
+// /reverse endpoint. This method dispatches the workflow and then polls
+// the reverse pool until the buildlet registers with the expected hostname.
 func (b *GHABuildlet) GetBuildlet(ctx context.Context, hostType string, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
 	hconf, ok := b.hosts[hostType]
 	if !ok {
@@ -143,7 +139,7 @@ func (b *GHABuildlet) GetBuildlet(ctx context.Context, hostType string, lg Logge
 		Repo:            hconf.GHARepo,
 		WorkflowFile:    hconf.GHAWorkflow,
 		CoordinatorAddr: b.coordinatorAddr,
-		Waiter:          b.rendezvous,
+		Waiter:          reversePool,
 		OnWorkflowDispatched: func() {
 			b.mu.Lock()
 			if inst, ok := b.active[instName]; ok {

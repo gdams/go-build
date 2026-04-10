@@ -55,8 +55,9 @@ const minBuildletVersion = 23
 
 var (
 	reversePool = &ReverseBuildletPool{
-		hostLastGood: make(map[string]time.Time),
-		hostQueue:    make(map[string]*queue.Quota),
+		hostLastGood:   make(map[string]time.Time),
+		hostQueue:      make(map[string]*queue.Quota),
+		pendingWaiters: make(map[string]chan buildlet.Client),
 	}
 
 	builderMasterKey []byte
@@ -75,7 +76,7 @@ func ReversePool() *ReverseBuildletPool {
 
 // ReverseBuildletPool manages the pool of reverse buildlet pools.
 type ReverseBuildletPool struct {
-	// mu guards all 5 fields below and also fields of
+	// mu guards all fields below and also fields of
 	// *reverseBuildlet in buildlets
 	mu sync.Mutex
 
@@ -102,6 +103,12 @@ type ReverseBuildletPool struct {
 	// machines as both POWER8 and POWER9 host types, but with the
 	// same names).
 	hostLastGood map[string]time.Time
+
+	// pendingWaiters maps instance names (hostnames) to channels
+	// that will receive the buildlet client when a reverse buildlet
+	// with that hostname registers. Used by the GHA pool to wait
+	// for specific buildlet instances.
+	pendingWaiters map[string]chan buildlet.Client
 }
 
 // BuildletLastSeen gives the last time a buildlet was connected to the pool. If
@@ -440,7 +447,56 @@ func (p *ReverseBuildletPool) addBuildlet(b *reverseBuildlet) {
 	defer p.mu.Unlock()
 	p.buildlets = append(p.buildlets, b)
 	p.recordHealthy(b)
+
+	// If someone is waiting for this specific hostname (e.g. the GHA pool),
+	// deliver the buildlet client to them and don't start the health check
+	// loop since the caller takes ownership.
+	if ch, ok := p.pendingWaiters[b.hostname]; ok {
+		delete(p.pendingWaiters, b.hostname)
+		b.inUse = true
+		b.inUseTime = time.Now()
+		ch <- b.client
+		return
+	}
 	go p.healthCheckBuildletLoop(b)
+}
+
+// RegisterInstance registers an instance name so that WaitForInstance
+// can be called to wait for a reverse buildlet with that hostname.
+// This implements part of the buildlet.BuildletWaiter interface.
+func (p *ReverseBuildletPool) RegisterInstance(_ context.Context, id string, _ time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pendingWaiters[id] = make(chan buildlet.Client, 1)
+}
+
+// WaitForInstance waits for a reverse buildlet with the given hostname to
+// register. It blocks until the buildlet connects or the context is cancelled.
+// This implements part of the buildlet.BuildletWaiter interface.
+func (p *ReverseBuildletPool) WaitForInstance(ctx context.Context, id string) (buildlet.Client, error) {
+	p.mu.Lock()
+	ch, ok := p.pendingWaiters[id]
+	p.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("instance not registered: %q", id)
+	}
+	select {
+	case bc := <-ch:
+		return bc, nil
+	case <-ctx.Done():
+		p.mu.Lock()
+		delete(p.pendingWaiters, id)
+		p.mu.Unlock()
+		return nil, fmt.Errorf("context cancelled waiting for instance %q: %w", id, ctx.Err())
+	}
+}
+
+// DeregisterInstance removes a pending waiter registration.
+// This implements part of the buildlet.BuildletWaiter interface.
+func (p *ReverseBuildletPool) DeregisterInstance(_ context.Context, id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pendingWaiters, id)
 }
 
 // BuildletHostnames returns a slice of reverse buildlet hostnames.
