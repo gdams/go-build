@@ -5,21 +5,24 @@
 package buildlet
 
 import (
-	"bytes"
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
-)
 
-// gitHubActionsAPI represents the GitHub API calls needed for dispatching workflows.
-// This interface exists for testability, allowing tests to inject a fake implementation.
-type gitHubActionsAPI interface {
-	DispatchWorkflow(ctx context.Context, owner, repo, workflowFile, gitRef string, inputs map[string]string) error
-}
+	"github.com/google/go-github/v74/github"
+	"golang.org/x/oauth2"
+)
 
 // BuildletWaiter provides a mechanism to wait for a reverse buildlet connection.
 // The rendezvous.Rendezvous type satisfies this interface.
@@ -33,14 +36,48 @@ type BuildletWaiter interface {
 // workflow_dispatch events. It mirrors the pattern of EC2Client: a thin wrapper
 // around a cloud API that dispatches work and returns a connected Client.
 type GitHubActionsClient struct {
-	client gitHubActionsAPI
+	client *ghAPIClient
 }
 
-// NewGitHubActionsClient creates a new GitHubActionsClient.
+// NewGitHubActionsClient creates a new GitHubActionsClient that authenticates
+// using a static token. This is intended for development and testing.
 func NewGitHubActionsClient(httpClient *http.Client, token string) *GitHubActionsClient {
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	return &GitHubActionsClient{
-		client: &ghAPIClient{httpClient: httpClient, token: token},
+		client: &ghAPIClient{
+			httpClient: &http.Client{
+				Transport: &oauth2.Transport{
+					Source: ts,
+					Base:   httpClient.Transport,
+				},
+			},
+			clients: make(map[int64]*github.Client),
+		},
 	}
+}
+
+// NewGitHubActionsClientFromApp creates a new GitHubActionsClient that
+// authenticates as a GitHub App. It generates short-lived installation
+// tokens on demand using the app's private key. The installation ID
+// for each target repository is resolved dynamically.
+func NewGitHubActionsClientFromApp(httpClient *http.Client, clientID int64, privateKeyPEM []byte) (*GitHubActionsClient, error) {
+	block, _ := pem.Decode(privateKeyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block from private key")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	return &GitHubActionsClient{
+		client: &ghAPIClient{
+			httpClient: httpClient,
+			clientID:   clientID,
+			privateKey: key,
+			instIDs:    make(map[string]int64),
+			clients:    make(map[int64]*github.Client),
+		},
+	}, nil
 }
 
 // GitHubActionsOpts contains options for dispatching a GitHub Actions buildlet.
@@ -89,7 +126,7 @@ func (c *GitHubActionsClient) StartBuildlet(ctx context.Context, instName, hostT
 	// Register with the waiter before dispatching so the runner can connect back.
 	opts.Waiter.RegisterInstance(ctx, instName, timeout)
 
-	inputs := map[string]string{
+	inputs := map[string]any{
 		"instance_name": instName,
 		"host_type":     hostType,
 		"coordinator":   opts.CoordinatorAddr,
@@ -122,42 +159,175 @@ func parseRepo(s string) (owner, repo, ref string, err error) {
 	return ownerRepo[0], ownerRepo[1], ref, nil
 }
 
-// ghAPIClient is the real GitHub API client implementation.
+// ghAPIClient implements gitHubActionsAPI using the go-github library.
+// In static token mode (privateKey is nil), httpClient already carries
+// the oauth2 transport and a single github.Client is cached.
+// In GitHub App mode (privateKey is set), it dynamically resolves
+// installation IDs per-repository and caches a github.Client per
+// installation ID, each using an installTokenTransport that
+// automatically refreshes the installation token when it expires.
 type ghAPIClient struct {
 	httpClient *http.Client
-	token      string
+	clientID   int64
+	privateKey *rsa.PrivateKey
+	apiBaseURL string // for testing; if empty, uses GitHub's default API URL
+
+	mu      sync.Mutex
+	instIDs map[string]int64         // "owner/repo" -> installation ID
+	clients map[int64]*github.Client // installation ID -> cached client
 }
 
-func (c *ghAPIClient) DispatchWorkflow(ctx context.Context, owner, repo, workflowFile, gitRef string, inputs map[string]string) error {
-	payload := map[string]any{
-		"ref":    gitRef,
-		"inputs": inputs,
-	}
-	body, err := json.Marshal(payload)
+func (c *ghAPIClient) DispatchWorkflow(ctx context.Context, owner, repo, workflowFile, gitRef string, inputs map[string]any) error {
+	ghClient, err := c.clientForRepo(ctx, owner, repo)
 	if err != nil {
-		return fmt.Errorf("marshal dispatch payload: %w", err)
+		return err
+	}
+	_, err = ghClient.Actions.CreateWorkflowDispatchEventByFileName(ctx, owner, repo, workflowFile, github.CreateWorkflowDispatchEventRequest{
+		Ref:    gitRef,
+		Inputs: inputs,
+	})
+	return err
+}
+
+// clientForRepo returns a github.Client for the given repository.
+// In static token mode it returns a single cached client.
+// In App mode, clients are cached per installation ID and their
+// transport refreshes the token automatically when it expires.
+func (c *ghAPIClient) clientForRepo(ctx context.Context, owner, repo string) (*github.Client, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.privateKey == nil {
+		if gh, ok := c.clients[0]; ok {
+			return gh, nil
+		}
+		gh := github.NewClient(c.httpClient)
+		if c.apiBaseURL != "" {
+			gh, _ = gh.WithEnterpriseURLs(c.apiBaseURL, c.apiBaseURL)
+		}
+		c.clients[0] = gh
+		return gh, nil
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/workflows/%s/dispatches",
-		owner, repo, workflowFile)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create dispatch request: %w", err)
+	key := owner + "/" + repo
+	instID, ok := c.instIDs[key]
+	if !ok {
+		// Look up the installation ID for this repo.
+		jwtClient, err := c.jwtClient()
+		if err != nil {
+			return nil, err
+		}
+		install, _, err := jwtClient.Apps.FindRepositoryInstallation(ctx, owner, repo)
+		if err != nil {
+			return nil, fmt.Errorf("find repository installation for %s: %w", key, err)
+		}
+		instID = install.GetID()
+		c.instIDs[key] = instID
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("dispatch request failed: %w", err)
+	if gh, ok := c.clients[instID]; ok {
+		return gh, nil
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("dispatch returned status %d: %s", resp.StatusCode, string(respBody))
+	// Create a new client with a self-refreshing transport.
+	t := &installTokenTransport{
+		app:    c,
+		instID: instID,
+		base:   c.httpClient.Transport,
 	}
-	return nil
+	ghClient := github.NewClient(&http.Client{Transport: t})
+	if c.apiBaseURL != "" {
+		ghClient, _ = ghClient.WithEnterpriseURLs(c.apiBaseURL, c.apiBaseURL)
+	}
+	c.clients[instID] = ghClient
+	return ghClient, nil
+}
+
+// jwtClient returns a github.Client authenticated with a short-lived App JWT.
+func (c *ghAPIClient) jwtClient() (*github.Client, error) {
+	jwt, err := c.signJWT()
+	if err != nil {
+		return nil, fmt.Errorf("sign app JWT: %w", err)
+	}
+	httpClient := &http.Client{
+		Transport: &oauth2.Transport{
+			Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: jwt}),
+			Base:   c.httpClient.Transport,
+		},
+	}
+	ghClient := github.NewClient(httpClient)
+	if c.apiBaseURL != "" {
+		ghClient, _ = ghClient.WithEnterpriseURLs(c.apiBaseURL, c.apiBaseURL)
+	}
+	return ghClient, nil
+}
+
+// installTokenTransport is an http.RoundTripper that authenticates requests
+// using a GitHub App installation token, refreshing it when it expires.
+type installTokenTransport struct {
+	app    *ghAPIClient
+	instID int64
+	base   http.RoundTripper
+
+	mu  sync.Mutex
+	tok *oauth2.Token
+}
+
+func (t *installTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	token, err := t.token(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+token)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(r)
+}
+
+func (t *installTokenTransport) token(ctx context.Context) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.tok != nil && t.tok.Valid() {
+		return t.tok.AccessToken, nil
+	}
+
+	jwtClient, err := t.app.jwtClient()
+	if err != nil {
+		return "", err
+	}
+	instToken, _, err := jwtClient.Apps.CreateInstallationToken(ctx, t.instID, nil)
+	if err != nil {
+		return "", fmt.Errorf("create installation token: %w", err)
+	}
+	t.tok = &oauth2.Token{
+		AccessToken: instToken.GetToken(),
+		Expiry:      instToken.GetExpiresAt().Time.Add(-time.Minute),
+	}
+	return t.tok.AccessToken, nil
+}
+
+// signJWT creates a short-lived JWT for authenticating as the GitHub App.
+func (c *ghAPIClient) signJWT() (string, error) {
+	now := time.Now()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	claims, err := json.Marshal(map[string]any{
+		"iss": c.clientID,
+		"iat": now.Add(-60 * time.Second).Unix(),
+		"exp": now.Add(10 * time.Minute).Unix(),
+	})
+	if err != nil {
+		return "", err
+	}
+	payload := base64.RawURLEncoding.EncodeToString(claims)
+	signingInput := header + "." + payload
+	h := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, c.privateKey, crypto.SHA256, h[:])
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }

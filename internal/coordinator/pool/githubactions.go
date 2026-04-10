@@ -27,6 +27,10 @@ import (
 
 var _ Buildlet = (*GitHubActionsBuildlet)(nil)
 
+// gitHubActionsClientID is the GitHub App client ID for the coordinator's
+// GitHub App used to dispatch workflow_dispatch events.
+const gitHubActionsClientID = 0 // TODO: set to the actual GitHub App client ID
+
 // gitHubActionsBuildlet is the package level GitHub Actions buildlet pool.
 var gitHubActionsBuildlet *GitHubActionsBuildlet
 
@@ -74,7 +78,6 @@ func NewGitHubActionsBuildlet(
 	rdv *rendezvous.Rendezvous,
 	opts ...GitHubActionsOpt,
 ) (*GitHubActionsBuildlet, error) {
-	var ghToken string
 	b := &GitHubActionsBuildlet{
 		hosts:           hosts,
 		rendezvous:      rdv,
@@ -85,28 +88,30 @@ func NewGitHubActionsBuildlet(
 		opt(b)
 	}
 
-	// In dev mode (no secret client), allow env var overrides.
+	// In dev mode (no secret client), allow env var overrides
+	// with a static GitHub token.
 	if sc == nil {
-		if v := os.Getenv("GHA_GITHUB_TOKEN"); v != "" {
-			ghToken = v
-		}
+		ghToken := os.Getenv("GHA_GITHUB_TOKEN")
 		if v := os.Getenv("GHA_COORDINATOR_ADDR"); v != "" {
 			b.coordinatorAddr = v
 		}
+		b.client = buildlet.NewGitHubActionsClient(http.DefaultClient, ghToken)
+		gitHubActionsBuildlet = b
+		return b, nil
 	}
 
-	// Retrieve secrets if a secret client is available.
-	if sc != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		token, err := sc.Retrieve(ctx, secret.NameGitHubActionsToken)
-		if err != nil {
-			return nil, fmt.Errorf("github actions pool: unable to retrieve GitHub token: %w", err)
-		}
-		ghToken = token
+	// Production: authenticate as a GitHub App.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	privateKey, err := sc.Retrieve(ctx, secret.NameGitHubActionsAppPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("github actions pool: unable to retrieve app private key: %w", err)
 	}
-
-	b.client = buildlet.NewGitHubActionsClient(http.DefaultClient, ghToken)
+	client, err := buildlet.NewGitHubActionsClientFromApp(http.DefaultClient, gitHubActionsClientID, []byte(privateKey))
+	if err != nil {
+		return nil, fmt.Errorf("github actions pool: %w", err)
+	}
+	b.client = client
 
 	gitHubActionsBuildlet = b
 	return b, nil
