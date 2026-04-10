@@ -402,7 +402,7 @@ func main() {
 
 	// Initialize the GitHub Actions buildlet pool for Windows 11 ARM64 runners.
 	ghaRdv := rendezvous.New(context.Background())
-	ghaPool, err := pool.NewGHABuildlet(sc, dashboard.Hosts, ghaRdv)
+	ghaPool, err := pool.NewGHABuildlet(buildenv.Production, sc, dashboard.Hosts, ghaRdv)
 	if err != nil {
 		log.Printf("unable to create GitHub Actions buildlet pool: %v", err)
 	}

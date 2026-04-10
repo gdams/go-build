@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/build/buildenv"
 	"golang.org/x/build/buildlet"
 	"golang.org/x/build/dashboard"
 	"golang.org/x/build/internal/coordinator/pool/queue"
@@ -26,10 +27,6 @@ import (
 )
 
 var _ Buildlet = (*GHABuildlet)(nil)
-
-// ghaClientID is the GitHub App client ID for the coordinator's
-// GitHub App used to dispatch workflow_dispatch events.
-const ghaClientID = 0 // TODO: set to the actual GitHub App client ID
 
 // ghaBuildlet is the package level GitHub Actions buildlet pool.
 var ghaBuildlet *GHABuildlet
@@ -73,6 +70,7 @@ type ghaInstance struct {
 
 // NewGHABuildlet creates a new GitHub Actions buildlet pool.
 func NewGHABuildlet(
+	buildEnv *buildenv.Environment,
 	sc *secret.Client,
 	hosts map[string]*dashboard.HostConfig,
 	rdv *rendezvous.Rendezvous,
@@ -107,7 +105,7 @@ func NewGHABuildlet(
 	if err != nil {
 		return nil, fmt.Errorf("github actions pool: unable to retrieve app private key: %w", err)
 	}
-	client, err := buildlet.NewGHAClientFromApp(http.DefaultClient, ghaClientID, []byte(privateKey))
+	client, err := buildlet.NewGHAClientFromApp(http.DefaultClient, buildEnv.GHAAppClientID, []byte(privateKey))
 	if err != nil {
 		return nil, fmt.Errorf("github actions pool: %w", err)
 	}
