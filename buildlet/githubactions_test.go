@@ -64,10 +64,8 @@ func TestGitHubActionsStartBuildlet(t *testing.T) {
 
 	dispatched := false
 	opts := &GitHubActionsOpts{
-		Owner:           "golang",
-		Repo:            "build",
+		Repo:            "golang/build@main",
 		WorkflowFile:    "test.yml",
-		GitRef:          "main",
 		CoordinatorAddr: "localhost:443",
 		Waiter:          waiter,
 		OnWorkflowDispatched: func() {
@@ -123,7 +121,7 @@ func TestGitHubActionsStartBuildletError(t *testing.T) {
 			instName: "inst-1",
 			hostType: "host-test",
 			opts: &GitHubActionsOpts{
-				Owner: "golang",
+				Repo: "golang/build@main",
 			},
 		},
 		{
@@ -162,10 +160,8 @@ func TestGitHubActionsDispatchError(t *testing.T) {
 	c := &GitHubActionsClient{client: api}
 
 	opts := &GitHubActionsOpts{
-		Owner:        "golang",
-		Repo:         "build",
+		Repo:         "golang/build@main",
 		WorkflowFile: "test.yml",
-		GitRef:       "main",
 		Waiter:       waiter,
 	}
 
@@ -187,10 +183,8 @@ func TestGitHubActionsWaitError(t *testing.T) {
 	c := &GitHubActionsClient{client: api}
 
 	opts := &GitHubActionsOpts{
-		Owner:        "golang",
-		Repo:         "build",
+		Repo:         "golang/build@main",
 		WorkflowFile: "test.yml",
-		GitRef:       "main",
 		Waiter:       waiter,
 	}
 
@@ -211,10 +205,8 @@ func TestGitHubActionsDefaultTimeout(t *testing.T) {
 	c := &GitHubActionsClient{client: api}
 
 	opts := &GitHubActionsOpts{
-		Owner:        "golang",
-		Repo:         "build",
+		Repo:         "golang/build@main",
 		WorkflowFile: "test.yml",
-		GitRef:       "main",
 		Waiter:       waiter,
 	}
 
@@ -235,10 +227,8 @@ func TestGitHubActionsCustomTimeout(t *testing.T) {
 	c := &GitHubActionsClient{client: api}
 
 	opts := &GitHubActionsOpts{
-		Owner:               "golang",
-		Repo:                "build",
+		Repo:                "golang/build@main",
 		WorkflowFile:        "test.yml",
-		GitRef:              "main",
 		Waiter:              waiter,
 		RegistrationTimeout: 10 * time.Minute,
 	}

@@ -8,10 +8,6 @@ package pool
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -49,16 +45,6 @@ type GitHubActionsOpt func(*GitHubActionsBuildlet)
 type GitHubActionsBuildlet struct {
 	// client handles the GitHub API interaction and buildlet connection.
 	client *buildlet.GitHubActionsClient
-	// webhookSecret is the HMAC secret for validating incoming webhook callbacks.
-	webhookSecret string
-	// owner is the GitHub repository owner (e.g., "golang").
-	owner string
-	// repo is the GitHub repository name (e.g., "build").
-	repo string
-	// workflowFile is the workflow filename to dispatch (e.g., "win11-arm-buildlet.yml").
-	workflowFile string
-	// gitRef is the git ref (branch) to dispatch the workflow on.
-	gitRef string
 	// coordinatorAddr is the address the workflow runner should connect back to.
 	coordinatorAddr string
 	// hosts provides the host configuration for all hosts.
@@ -93,10 +79,6 @@ func NewGitHubActionsBuildlet(
 		hosts:           hosts,
 		rendezvous:      rdv,
 		active:          make(map[string]*ghaInstance),
-		owner:           "golang",
-		repo:            "build",
-		workflowFile:    "win11-arm-buildlet.yml",
-		gitRef:          "main",
 		coordinatorAddr: "farmer.golang.org:443",
 	}
 	for _, opt := range opts {
@@ -107,15 +89,6 @@ func NewGitHubActionsBuildlet(
 	if sc == nil {
 		if v := os.Getenv("GHA_GITHUB_TOKEN"); v != "" {
 			ghToken = v
-		}
-		if v := os.Getenv("GHA_REPO_OWNER"); v != "" {
-			b.owner = v
-		}
-		if v := os.Getenv("GHA_REPO_NAME"); v != "" {
-			b.repo = v
-		}
-		if v := os.Getenv("GHA_GIT_REF"); v != "" {
-			b.gitRef = v
 		}
 		if v := os.Getenv("GHA_COORDINATOR_ADDR"); v != "" {
 			b.coordinatorAddr = v
@@ -131,11 +104,6 @@ func NewGitHubActionsBuildlet(
 			return nil, fmt.Errorf("github actions pool: unable to retrieve GitHub token: %w", err)
 		}
 		ghToken = token
-		whSecret, err := sc.Retrieve(ctx, secret.NameGitHubActionsWebhookSecret)
-		if err != nil {
-			return nil, fmt.Errorf("github actions pool: unable to retrieve webhook secret: %w", err)
-		}
-		b.webhookSecret = whSecret
 	}
 
 	b.client = buildlet.NewGitHubActionsClient(http.DefaultClient, ghToken)
@@ -148,7 +116,8 @@ func NewGitHubActionsBuildlet(
 // buildlet. The workflow connects to LUCI, runs golangbuild setup, and then
 // connects back as a reverse buildlet through the rendezvous system.
 func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
-	if _, ok := b.hosts[hostType]; !ok {
+	hconf, ok := b.hosts[hostType]
+	if !ok {
 		return nil, fmt.Errorf("github actions pool: unknown host type %q", hostType)
 	}
 
@@ -162,16 +131,14 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 		HostType:  hostType,
 		Created:   time.Now(),
 		Status:    "dispatching",
-		WorkflowS: b.workflowFile,
+		WorkflowS: hconf.GitHubActionsWorkflow,
 	}
 	b.mu.Unlock()
 
 	dispatchSpan := lg.CreateSpan("dispatch_and_wait_github_actions", instName)
 	bc, err := b.client.StartBuildlet(ctx, instName, hostType, &buildlet.GitHubActionsOpts{
-		Owner:           b.owner,
-		Repo:            b.repo,
-		WorkflowFile:    b.workflowFile,
-		GitRef:          b.gitRef,
+		Repo:            hconf.GitHubActionsRepo,
+		WorkflowFile:    hconf.GitHubActionsWorkflow,
 		CoordinatorAddr: b.coordinatorAddr,
 		Waiter:          b.rendezvous,
 		OnWorkflowDispatched: func() {
@@ -202,99 +169,6 @@ func (b *GitHubActionsBuildlet) GetBuildlet(ctx context.Context, hostType string
 	})
 	bc.SetInstanceName(instName)
 	return bc, nil
-}
-
-// HandleWebhook handles incoming webhook callbacks from GitHub Actions runners.
-// The runner calls this endpoint after connecting to LUCI and before starting golangbuild,
-// to confirm it is alive and provide its run ID.
-//
-// Expected JSON body:
-//
-//	{
-//	  "instance_name": "buildlet-windows11-arm64-gha-rn...",
-//	  "run_id": 12345,
-//	  "status": "ready"
-//	}
-func (b *GitHubActionsBuildlet) HandleWebhook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB limit
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
-
-	// Validate HMAC signature from the X-Hub-Signature-256 header.
-	if b.webhookSecret != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if !b.validateHMAC(bodyBytes, sig) {
-			http.Error(w, "invalid signature", http.StatusForbidden)
-			return
-		}
-	}
-
-	var payload struct {
-		InstanceName string `json:"instance_name"`
-		RunID        int64  `json:"run_id"`
-		Status       string `json:"status"`
-	}
-	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-
-	if payload.InstanceName == "" {
-		http.Error(w, "missing instance_name", http.StatusBadRequest)
-		return
-	}
-
-	b.mu.Lock()
-	inst, ok := b.active[payload.InstanceName]
-	if !ok {
-		// In dev mode (no webhook secret configured), auto-register
-		// unknown instances so the e2e flow can be tested without
-		// a prior GetBuildlet call.
-		if b.webhookSecret == "" {
-			inst = &ghaInstance{
-				Name:    payload.InstanceName,
-				Created: time.Now(),
-				Status:  "webhook-registered",
-			}
-			b.active[payload.InstanceName] = inst
-			ok = true
-			log.Printf("GitHub Actions webhook: auto-registered instance=%s (dev mode)", payload.InstanceName)
-		}
-	}
-	if ok && payload.RunID != 0 {
-		inst.RunID = payload.RunID
-	}
-	b.mu.Unlock()
-
-	if !ok {
-		http.Error(w, "unknown instance", http.StatusNotFound)
-		return
-	}
-
-	log.Printf("GitHub Actions webhook: instance=%s run_id=%d status=%s", payload.InstanceName, payload.RunID, payload.Status)
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"ok":true}`)
-}
-
-// validateHMAC checks the X-Hub-Signature-256 header against the webhook secret.
-func (b *GitHubActionsBuildlet) validateHMAC(body []byte, signature string) bool {
-	if !strings.HasPrefix(signature, "sha256=") {
-		return false
-	}
-	sig, err := hex.DecodeString(strings.TrimPrefix(signature, "sha256="))
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(b.webhookSecret))
-	mac.Write(body)
-	return hmac.Equal(sig, mac.Sum(nil))
 }
 
 // String gives a report of capacity usage for the GitHub Actions buildlet pool.

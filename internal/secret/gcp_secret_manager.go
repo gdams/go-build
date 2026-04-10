@@ -117,10 +117,6 @@ const (
 	// NameGitHubActionsToken is the secret name for the GitHub personal access token
 	// used to trigger workflow_dispatch events on the build repository.
 	NameGitHubActionsToken = "github-actions-dispatch-token"
-
-	// NameGitHubActionsWebhookSecret is the secret name for the HMAC secret
-	// used to validate webhook callbacks from GitHub Actions runners.
-	NameGitHubActionsWebhookSecret = "github-actions-webhook-secret"
 )
 
 type BlueskyCredentials struct {

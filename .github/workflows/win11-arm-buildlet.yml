@@ -34,41 +34,6 @@ jobs:
       HAS_LUCI_SA: ${{ secrets.LUCI_SERVICE_ACCOUNT != '' }}
 
     steps:
-      - name: Notify coordinator
-        continue-on-error: true
-        shell: pwsh
-        env:
-          WEBHOOK_SECRET: ${{ secrets.GHA_WEBHOOK_SECRET }}
-          COORDINATOR: ${{ inputs.coordinator }}
-          INSTANCE_NAME: ${{ inputs.instance_name }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          $body = @{
-            instance_name = $env:INSTANCE_NAME
-            run_id        = [long]$env:RUN_ID
-            status        = "ready"
-          } | ConvertTo-Json -Compress
-
-          $hmac = New-Object System.Security.Cryptography.HMACSHA256
-          $hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($env:WEBHOOK_SECRET)
-          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-          $hash = $hmac.ComputeHash($bodyBytes)
-          $sig = "sha256=" + [System.BitConverter]::ToString($hash).Replace("-", "").ToLower()
-
-          $headers = @{
-            "X-Hub-Signature-256" = $sig
-            "Content-Type"        = "application/json"
-          }
-
-          # Extract host from coordinator address.
-          $coordHost = ($env:COORDINATOR -split ':')[0]
-
-          Invoke-RestMethod `
-            -Uri "https://$coordHost/github-actions/webhook" `
-            -Method Post `
-            -Headers $headers `
-            -Body $body
-
       - name: Install CIPD tools
         shell: pwsh
         run: |

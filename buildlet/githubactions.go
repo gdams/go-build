@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -44,14 +45,11 @@ func NewGitHubActionsClient(httpClient *http.Client, token string) *GitHubAction
 
 // GitHubActionsOpts contains options for dispatching a GitHub Actions buildlet.
 type GitHubActionsOpts struct {
-	// Owner is the GitHub repository owner (e.g. "golang").
-	Owner string
-	// Repo is the GitHub repository name (e.g. "build").
+	// Repo is the GitHub repository in "owner/repo@ref" format
+	// (e.g. "golang/build@main").
 	Repo string
 	// WorkflowFile is the workflow filename to dispatch (e.g. "win11-arm-buildlet.yml").
 	WorkflowFile string
-	// GitRef is the git ref (branch) to dispatch the workflow on.
-	GitRef string
 	// CoordinatorAddr is the address the workflow runner should connect back to.
 	CoordinatorAddr string
 	// Waiter provides the mechanism for waiting for the reverse buildlet connection.
@@ -78,6 +76,11 @@ func (c *GitHubActionsClient) StartBuildlet(ctx context.Context, instName, hostT
 		return nil, fmt.Errorf("invalid instName: %q and hostType: %q", instName, hostType)
 	}
 
+	owner, repo, gitRef, err := parseRepo(opts.Repo)
+	if err != nil {
+		return nil, err
+	}
+
 	timeout := opts.RegistrationTimeout
 	if timeout == 0 {
 		timeout = 30 * time.Minute
@@ -91,7 +94,7 @@ func (c *GitHubActionsClient) StartBuildlet(ctx context.Context, instName, hostT
 		"host_type":     hostType,
 		"coordinator":   opts.CoordinatorAddr,
 	}
-	if err := c.client.DispatchWorkflow(ctx, opts.Owner, opts.Repo, opts.WorkflowFile, opts.GitRef, inputs); err != nil {
+	if err := c.client.DispatchWorkflow(ctx, owner, repo, opts.WorkflowFile, gitRef, inputs); err != nil {
 		opts.Waiter.DeregisterInstance(ctx, instName)
 		return nil, fmt.Errorf("dispatch workflow: %w", err)
 	}
@@ -105,6 +108,20 @@ func (c *GitHubActionsClient) StartBuildlet(ctx context.Context, instName, hostT
 	return bc, nil
 }
 
+// parseRepo parses a repo string in "owner/repo@ref" format.
+func parseRepo(s string) (owner, repo, ref string, err error) {
+	parts := strings.SplitN(s, "@", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return "", "", "", fmt.Errorf("invalid repo %q: expected owner/repo@ref", s)
+	}
+	ref = parts[1]
+	ownerRepo := strings.SplitN(parts[0], "/", 2)
+	if len(ownerRepo) != 2 || ownerRepo[0] == "" || ownerRepo[1] == "" {
+		return "", "", "", fmt.Errorf("invalid repo %q: expected owner/repo@ref", s)
+	}
+	return ownerRepo[0], ownerRepo[1], ref, nil
+}
+
 // ghAPIClient is the real GitHub API client implementation.
 type ghAPIClient struct {
 	httpClient *http.Client
@@ -112,7 +129,7 @@ type ghAPIClient struct {
 }
 
 func (c *ghAPIClient) DispatchWorkflow(ctx context.Context, owner, repo, workflowFile, gitRef string, inputs map[string]string) error {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"ref":    gitRef,
 		"inputs": inputs,
 	}

@@ -415,7 +415,6 @@ func main() {
 	mux.HandleFunc("/reverse", pool.HandleReverse)
 	mux.Handle("/revdial", revdial.ConnHandler())
 	if ghaPool != nil {
-		mux.HandleFunc("/github-actions/webhook", ghaPool.HandleWebhook)
 		mux.HandleFunc("/github-actions/reverse", ghaRdv.HandleReverse)
 	}
 	mux.HandleFunc("/style.css", handleStyleCSS)
