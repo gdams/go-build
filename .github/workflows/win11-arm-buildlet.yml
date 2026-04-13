@@ -59,7 +59,8 @@ jobs:
           Write-Host "Host type: $env:HOST_TYPE"
 
           # Use the Go installed by setup-go as the bootstrap toolchain.
-          $env:GOROOT_BOOTSTRAP = $env:GOROOT
+          $env:GOROOT_BOOTSTRAP = (go env GOROOT)
+          Write-Host "GOROOT_BOOTSTRAP=$env:GOROOT_BOOTSTRAP"
 
           # Set dev mode env so buildlet skips TLS verification
           # and uses a dev key (for testing with mock coordinator).
