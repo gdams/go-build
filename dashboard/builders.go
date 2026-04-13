@@ -575,7 +575,8 @@ var Hosts = map[string]*HostConfig{
 	"host-windows11-arm64-gha": {
 		Notes:           "Windows 11 ARM64 via GitHub Actions runners",
 		HostArch:        "windows-arm64",
-		IsReverse:       true, // connects back as a reverse buildlet
+		GoBootstrap:     "none", // Go is pre-installed on the GHA runner via setup-go
+		IsReverse:       true,   // connects back as a reverse buildlet
 		ExpectNum:       2,
 		HermeticReverse: true, // each GHA runner is a fresh environment
 		IsGHA:           true,
@@ -1020,11 +1021,7 @@ func (c *BuildConfig) GoBootstrapURL(e *buildenv.Environment) string {
 		//
 		// Since all this will be replaced by LUCI fairly soon,
 		// keep using the bootstrap bucket for Windows for now.
-		bucket := e.BuildletBucket
-		if bucket == "" {
-			bucket = "go-builder-data" // public production bucket as fallback
-		}
-		return "https://storage.googleapis.com/" + bucket +
+		return "https://storage.googleapis.com/" + e.BuildletBucket +
 			"/gobootstrap-" + hc.HostArch + "-" + hc.GoBootstrap + ".tar.gz"
 	}
 	hostOSArch := strings.TrimSuffix(hc.HostArch, "-7") // Issue 69038.

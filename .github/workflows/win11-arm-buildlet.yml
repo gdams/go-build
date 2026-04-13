@@ -53,6 +53,7 @@ jobs:
           COORDINATOR: ${{ inputs.coordinator }}
           INSTANCE_NAME: ${{ inputs.instance_name }}
           HOST_TYPE: ${{ inputs.host_type }}
+          GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
         run: |
           Write-Host "Connecting buildlet to coordinator at $env:COORDINATOR ..."
           Write-Host "Instance: $env:INSTANCE_NAME"
