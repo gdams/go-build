@@ -128,6 +128,10 @@ type ReverseBuildletPool struct {
 	// to wait for specific buildlet instances.
 	pendingWaiters map[string]chan buildlet.Client
 
+	// provisionerQuotas limits the number of concurrent on-demand
+	// provisioned buildlets per host type. Keyed by host type.
+	provisionerQuotas map[string]*queue.Quota
+
 	// startSeq is a monotonic counter for generating unique instance names
 	// for on-demand provisioned buildlets.
 	startSeq int64
@@ -178,6 +182,10 @@ func (p *ReverseBuildletPool) nukeBuildlet(victim buildlet.Client) {
 		if rb.client == victim {
 			defer rb.conn.Close()
 			p.buildlets = append(p.buildlets[:i], p.buildlets[i+1:]...)
+			// Return provisioner quota if this host type has one.
+			if q, ok := p.provisionerQuotas[rb.hostType]; ok {
+				q.ReturnQuota(1)
+			}
 			return
 		}
 	}
@@ -267,7 +275,15 @@ func (p *ReverseBuildletPool) RegisterProvisioner(hostType string, prov ReverseP
 	if p.provisioners == nil {
 		p.provisioners = make(map[string]ReverseProvisioner)
 	}
+	if p.provisionerQuotas == nil {
+		p.provisionerQuotas = make(map[string]*queue.Quota)
+	}
 	p.provisioners[hostType] = prov
+	if hconf, ok := dashboard.Hosts[hostType]; ok && hconf.ExpectNum > 0 {
+		q := queue.NewQuota()
+		q.UpdateLimit(hconf.ExpectNum)
+		p.provisionerQuotas[hostType] = q
+	}
 }
 
 func (p *ReverseBuildletPool) hostTypeQueue(hostType string) *queue.Quota {
@@ -288,7 +304,7 @@ func (p *ReverseBuildletPool) GetBuildlet(ctx context.Context, hostType string, 
 	p.mu.Unlock()
 
 	if prov != nil {
-		return p.getProvisionedBuildlet(ctx, hostType, prov, lg)
+		return p.getProvisionedBuildlet(ctx, hostType, prov, lg, si)
 	}
 
 	sp := lg.CreateSpan("wait_static_builder", hostType)
@@ -332,12 +348,28 @@ func (p *ReverseBuildletPool) cleanedBuildlet(b buildlet.Client, lg Logger) (bui
 }
 
 // getProvisionedBuildlet provisions a new on-demand reverse buildlet.
-func (p *ReverseBuildletPool) getProvisionedBuildlet(ctx context.Context, hostType string, prov ReverseProvisioner, lg Logger) (buildlet.Client, error) {
+func (p *ReverseBuildletPool) getProvisionedBuildlet(ctx context.Context, hostType string, prov ReverseProvisioner, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
+	// If a concurrency quota is configured, wait for capacity before dispatching.
+	p.mu.Lock()
+	q := p.provisionerQuotas[hostType]
+	p.mu.Unlock()
+	if q != nil {
+		qsp := lg.CreateSpan("awaiting_gha_quota", hostType)
+		err := q.AwaitQueue(ctx, 1, si)
+		qsp.Done(err)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	instName := p.newInstanceName(hostType)
 	log.Printf("Provisioning on-demand reverse buildlet %q for %s", instName, hostType)
 
 	bc, err := prov.ProvisionBuildlet(ctx, instName, hostType, p, lg)
 	if err != nil {
+		if q != nil {
+			q.ReturnQuota(1)
+		}
 		return nil, fmt.Errorf("on-demand reverse buildlet %s: %w", instName, err)
 	}
 
