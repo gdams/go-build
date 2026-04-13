@@ -115,9 +115,10 @@ var (
 	masterKeyFile = flag.String("masterkey", "", "Path to builder master key. Else fetched using GCE project attribute 'builder-master-key'.")
 	mode          = flag.String("mode", "", "Valid modes are 'dev', 'prod', or '' for auto-detect. dev means localhost development, not be confused with staging on go-dashboard-dev, which is still the 'prod' mode.")
 	buildEnvName  = flag.String("env", "", "The build environment configuration to use. Not required if running in dev mode locally or prod mode on GCE.")
-	devEnableGCE  = flag.Bool("dev_gce", false, "Whether or not to enable the GCE pool when in dev mode. The pool is enabled by default in prod mode.")
-	devEnableEC2  = flag.Bool("dev_ec2", false, "Whether or not to enable the EC2 pool when in dev mode. The pool is enabled by default in prod mode.")
-	sshAddr       = flag.String("ssh_addr", ":2222", "Address the gomote SSH server should listen on")
+	devEnableGCE      = flag.Bool("dev_gce", false, "Whether or not to enable the GCE pool when in dev mode. The pool is enabled by default in prod mode.")
+	devEnableEC2      = flag.Bool("dev_ec2", false, "Whether or not to enable the EC2 pool when in dev mode. The pool is enabled by default in prod mode.")
+	devEnableFindWork = flag.Bool("dev_findwork", false, "Whether or not to poll the dashboard for work when in dev mode.")
+	sshAddr           = flag.String("ssh_addr", ":2222", "Address the gomote SSH server should listen on")
 )
 
 // LOCK ORDER:
@@ -451,7 +452,7 @@ func main() {
 		})
 		// TODO(crawshaw): do more in dev mode
 		gce.BuildletPool().SetEnabled(*devEnableGCE)
-		if *devEnableGCE || *devEnableEC2 {
+		if *devEnableGCE || *devEnableEC2 || *devEnableFindWork {
 			go findWorkLoop()
 		}
 	} else {
