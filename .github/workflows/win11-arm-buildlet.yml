@@ -39,7 +39,33 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: 1.26.2
+  
+      - name: Install llvm-mingw toolchain
+        shell: pwsh
+        run: |
+          # Go's CGO on Windows expects a MinGW-compatible C toolchain.
+          # The Azure startup.ps1 notes that LUCI builders get compilers
+          # via CIPD; for GitHub Actions we download llvm-mingw directly.
+          # See: https://github.com/golang/build/blob/master/env/windows-arm64/azure/startup.ps1
+          $version = "20250514"
+          $archive = "llvm-mingw-${version}-ucrt-aarch64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/${version}/${archive}"
+          $dest = "C:\llvm-mingw"
+
+          Write-Host "Downloading llvm-mingw from $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$archive" -UseBasicParsing
+          Write-Host "Extracting to $dest"
+          Expand-Archive -Path "$env:TEMP\$archive" -DestinationPath "C:\"
+          Rename-Item "C:\llvm-mingw-${version}-ucrt-aarch64" $dest
+
+          # Put llvm-mingw at the front of PATH so its gcc/clang shadow
+          # the x86-64 MinGW gcc that ships with Git for Windows.
+          echo "$dest\bin" >> $env:GITHUB_PATH
+          $env:PATH = "$dest\bin;$env:PATH"
+
+          Write-Host "CC: $(gcc --version 2>&1 | Select-Object -First 1)"
+          Write-Host "Target: $(gcc -dumpmachine)"
 
       - name: Build buildlet from source
         shell: pwsh
