@@ -53,11 +53,13 @@ jobs:
           COORDINATOR: ${{ inputs.coordinator }}
           INSTANCE_NAME: ${{ inputs.instance_name }}
           HOST_TYPE: ${{ inputs.host_type }}
-          GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
         run: |
           Write-Host "Connecting buildlet to coordinator at $env:COORDINATOR ..."
           Write-Host "Instance: $env:INSTANCE_NAME"
           Write-Host "Host type: $env:HOST_TYPE"
+
+          # Use the Go installed by setup-go as the bootstrap toolchain.
+          $env:GOROOT_BOOTSTRAP = $env:GOROOT
 
           # Set dev mode env so buildlet skips TLS verification
           # and uses a dev key (for testing with mock coordinator).
