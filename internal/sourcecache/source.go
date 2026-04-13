@@ -16,6 +16,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/build/internal/lru"
@@ -67,6 +70,15 @@ func GetSourceTgz(sl spanlog.Logger, repo, rev string) (tgz io.Reader, err error
 
 		sp := sl.CreateSpan("get_source_from_gerrit", fmt.Sprintf("%v from gerrit", key))
 		src, err := getSourceTgzFromGerrit(repo, rev)
+		sp.Done(err)
+		if err == nil {
+			sourceCache.Add(key, src)
+			return src, nil
+		}
+		log.Printf("Error fetching source %s/%s from gerrit: %v; trying git archive fallback", repo, rev, err)
+
+		sp = sl.CreateSpan("get_source_from_git", fmt.Sprintf("%v from git", key))
+		src, err = getSourceTgzFromGit(repo, rev)
 		sp.Done(err)
 		if err == nil {
 			sourceCache.Add(key, src)
@@ -178,4 +190,40 @@ func maxSize(repo string) int64 {
 		// tarball size of 135 MB. Give it some room to grow from there.
 		return 200 << 20
 	}
+}
+
+// getSourceTgzFromGit fetches the source tarball using git fetch + git archive.
+// This is a fallback for when the Gerrit /+archive/ endpoint is blocked.
+func getSourceTgzFromGit(repo, rev string) (source, error) {
+	dir, err := os.MkdirTemp("", "sourcecache-git-*")
+	if err != nil {
+		return source{}, fmt.Errorf("creating temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	gitDir := filepath.Join(dir, "repo")
+	remoteURL := "https://go.googlesource.com/" + repo
+
+	// Initialize a bare repo and fetch only the needed revision.
+	for _, args := range [][]string{
+		{"init", "--bare", gitDir},
+		{"-C", gitDir, "fetch", "--depth=1", remoteURL, rev},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			return source{}, fmt.Errorf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Create the tarball using git archive.
+	cmd := exec.Command("git", "-C", gitDir, "archive", "--format=tar.gz", "FETCH_HEAD")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	if err := cmd.Run(); err != nil {
+		return source{}, fmt.Errorf("git archive: %v", err)
+	}
+
+	if int64(buf.Len()) > maxSize(repo) {
+		return source{TooBig: true}, nil
+	}
+	return source{Tgz: buf.Bytes()}, nil
 }

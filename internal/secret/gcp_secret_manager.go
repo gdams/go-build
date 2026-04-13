@@ -113,6 +113,10 @@ const (
 	// NameVSCodeMarketplacePublishToken is the secret name for VS Code
 	// Marketplace publisher key.
 	NameVSCodeMarketplacePublishToken = "vscode-marketplace-token"
+
+	// NameGHAAppPrivateKey is the secret name for the GitHub App
+	// private key (PEM-encoded) used to sign JWTs for installation token generation.
+	NameGHAAppPrivateKey = "github-actions-app-private-key"
 )
 
 type BlueskyCredentials struct {

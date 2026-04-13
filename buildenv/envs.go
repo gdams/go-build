@@ -143,6 +143,10 @@ type Environment struct {
 	// GomoteTransferBucket is the bucket used by the gomote GRPC service
 	// to transfer files between gomote clients and the gomote instances.
 	GomoteTransferBucket string
+
+	// GHAAppClientID is the GitHub App client ID used to dispatch
+	// GitHub Actions workflow_dispatch events for GHA-backed buildlets.
+	GHAAppClientID int64
 }
 
 // ComputePrefix returns the URI prefix for Compute Engine resources in a project.
@@ -264,6 +268,7 @@ var Staging = &Environment{
 	AWSSecurityGroup:    "staging-go-builders",
 	AWSRegion:           "us-east-1",
 	iapServiceAudiences: map[string]string{},
+	GHAAppClientID:      0, // TODO: set to the staging GitHub App client ID
 }
 
 // Production defines the environment that the coordinator and build
@@ -296,6 +301,7 @@ var Production = &Environment{
 		"relui-internal":            "/projects/872405196845/global/backendServices/1081345757520014641",
 	},
 	GomoteTransferBucket: "gomote-transfer",
+	GHAAppClientID:       0, // TODO: set to the production GitHub App client ID
 }
 
 var LUCIProduction = &Environment{
