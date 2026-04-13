@@ -399,10 +399,10 @@ func main() {
 	protos.RegisterCoordinatorServer(grpcServer, gs)
 	gomoteprotos.RegisterGomoteServiceServer(grpcServer, gomoteServer)
 
-	// Initialize the GitHub Actions buildlet pool for Windows 11 ARM64 runners.
-	ghaPool, err := pool.NewGHABuildlet(buildenv.Production, sc, dashboard.Hosts)
+	// Initialize the GitHub Actions provisioner for on-demand reverse buildlets.
+	err = pool.NewGHAProvisioner(buildenv.Production, sc, dashboard.Hosts)
 	if err != nil {
-		log.Printf("unable to create GitHub Actions buildlet pool: %v", err)
+		log.Printf("unable to create GitHub Actions provisioner: %v", err)
 	}
 
 	mux.HandleFunc("/", grpcHandlerFunc(grpcServer, handleStatus)) // Serve a status page at farmer.golang.org.
@@ -419,34 +419,36 @@ func main() {
 	mux.Handle("/dashboard", dashV2)
 	mux.HandleFunc("/queues", handleQueues)
 	if *mode == "dev" {
-		if ghaPool != nil {
-			mux.HandleFunc("/debug/request-gha-buildlet", func(w http.ResponseWriter, r *http.Request) {
-				hostType := r.FormValue("host")
-				if hostType == "" {
-					hostType = "host-windows11-arm64-gha"
+		mux.HandleFunc("/debug/request-gha-buildlet", func(w http.ResponseWriter, r *http.Request) {
+			hostType := r.FormValue("host")
+			if hostType == "" {
+				hostType = "host-windows11-arm64-gha"
+			}
+			if !pool.ReversePool().CanBuild(hostType) {
+				http.Error(w, fmt.Sprintf("no provisioner registered for %s", hostType), http.StatusBadRequest)
+				return
+			}
+			log.Printf("debug: requesting GHA buildlet for %s", hostType)
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintf(w, "Requesting GHA buildlet for %s...\n", hostType)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				defer cancel()
+				bc, err := pool.ReversePool().GetBuildlet(ctx, hostType, nopLogger{}, &queue.SchedItem{
+					HostType:    hostType,
+					RequestTime: time.Now(),
+				})
+				if err != nil {
+					log.Printf("debug: GHA buildlet request failed: %v", err)
+					return
 				}
-				log.Printf("debug: requesting GHA buildlet for %s", hostType)
-				w.Header().Set("Content-Type", "text/plain")
-				fmt.Fprintf(w, "Requesting GHA buildlet for %s...\n", hostType)
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-					defer cancel()
-					bc, err := ghaPool.GetBuildlet(ctx, hostType, nopLogger{}, &queue.SchedItem{
-						HostType:    hostType,
-						RequestTime: time.Now(),
-					})
-					if err != nil {
-						log.Printf("debug: GHA buildlet request failed: %v", err)
-						return
-					}
-					log.Printf("debug: GHA buildlet connected! %s", bc.String())
-				}()
-				fmt.Fprintf(w, "Dispatched! Watch coordinator logs for progress.\n")
-			})
-		}
+				log.Printf("debug: GHA buildlet connected! %s", bc.String())
+			}()
+			fmt.Fprintf(w, "Dispatched! Watch coordinator logs for progress.\n")
+		})
 		// TODO(crawshaw): do more in dev mode
 		gce.BuildletPool().SetEnabled(*devEnableGCE)
 		if *devEnableGCE || *devEnableEC2 {

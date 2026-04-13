@@ -42,6 +42,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,17 @@ func ReversePool() *ReverseBuildletPool {
 	return reversePool
 }
 
+// ReverseProvisioner provisions new reverse buildlets on demand.
+// When the reverse pool needs a buildlet for a host type that has a
+// registered provisioner, it calls ProvisionBuildlet instead of
+// passively waiting for a pre-connected buildlet.
+type ReverseProvisioner interface {
+	// ProvisionBuildlet starts a new buildlet that will connect back
+	// via /reverse with the given instance name as its hostname.
+	// The waiter handles the connection rendezvous.
+	ProvisionBuildlet(ctx context.Context, instName, hostType string, waiter buildlet.BuildletWaiter, lg Logger) (buildlet.Client, error)
+}
+
 // ReverseBuildletPool manages the pool of reverse buildlet pools.
 type ReverseBuildletPool struct {
 	// mu guards all fields below and also fields of
@@ -85,6 +97,12 @@ type ReverseBuildletPool struct {
 	buildlets []*reverseBuildlet
 
 	hostQueue map[string]*queue.Quota
+
+	// provisioners maps host types to on-demand provisioners.
+	// When GetBuildlet is called for a host type with a provisioner,
+	// a new buildlet is provisioned instead of waiting for a
+	// pre-connected one.
+	provisioners map[string]ReverseProvisioner
 
 	// hostLastGood tracks when buildlets were last seen to be
 	// healthy. It's only used by the health reporting code (in
@@ -106,9 +124,13 @@ type ReverseBuildletPool struct {
 
 	// pendingWaiters maps instance names (hostnames) to channels
 	// that will receive the buildlet client when a reverse buildlet
-	// with that hostname registers. Used by the GHA pool to wait
-	// for specific buildlet instances.
+	// with that hostname registers. Used by on-demand provisioners
+	// to wait for specific buildlet instances.
 	pendingWaiters map[string]chan buildlet.Client
+
+	// startSeq is a monotonic counter for generating unique instance names
+	// for on-demand provisioned buildlets.
+	startSeq int64
 }
 
 // BuildletLastSeen gives the last time a buildlet was connected to the pool. If
@@ -235,6 +257,19 @@ func (p *ReverseBuildletPool) healthCheckBuildlet(b *reverseBuildlet) bool {
 	return true
 }
 
+// RegisterProvisioner registers an on-demand provisioner for the given
+// host type. When GetBuildlet is called for this host type, the provisioner
+// will be used to create a new buildlet instead of waiting for a
+// pre-connected one.
+func (p *ReverseBuildletPool) RegisterProvisioner(hostType string, prov ReverseProvisioner) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.provisioners == nil {
+		p.provisioners = make(map[string]ReverseProvisioner)
+	}
+	p.provisioners[hostType] = prov
+}
+
 func (p *ReverseBuildletPool) hostTypeQueue(hostType string) *queue.Quota {
 	if p.hostQueue[hostType] == nil {
 		queue := queue.NewQuota()
@@ -244,7 +279,18 @@ func (p *ReverseBuildletPool) hostTypeQueue(hostType string) *queue.Quota {
 }
 
 // GetBuildlet builds a buildlet client for the passed in host.
+// If an on-demand provisioner is registered for the host type, it will
+// be used to provision a new buildlet. Otherwise, it waits for a
+// pre-connected reverse buildlet to become available.
 func (p *ReverseBuildletPool) GetBuildlet(ctx context.Context, hostType string, lg Logger, si *queue.SchedItem) (buildlet.Client, error) {
+	p.mu.Lock()
+	prov := p.provisioners[hostType]
+	p.mu.Unlock()
+
+	if prov != nil {
+		return p.getProvisionedBuildlet(ctx, hostType, prov, lg)
+	}
+
 	sp := lg.CreateSpan("wait_static_builder", hostType)
 	// No need to return quota when done. The quotas will be updated
 	// when the reverse buildlet reconnects and becomes healthy.
@@ -283,6 +329,30 @@ func (p *ReverseBuildletPool) cleanedBuildlet(b buildlet.Client, lg Logger) (bui
 		return nil, err
 	}
 	return b, nil
+}
+
+// getProvisionedBuildlet provisions a new on-demand reverse buildlet.
+func (p *ReverseBuildletPool) getProvisionedBuildlet(ctx context.Context, hostType string, prov ReverseProvisioner, lg Logger) (buildlet.Client, error) {
+	instName := p.newInstanceName(hostType)
+	log.Printf("Provisioning on-demand reverse buildlet %q for %s", instName, hostType)
+
+	bc, err := prov.ProvisionBuildlet(ctx, instName, hostType, p, lg)
+	if err != nil {
+		return nil, fmt.Errorf("on-demand reverse buildlet %s: %w", instName, err)
+	}
+
+	bc.SetDescription(fmt.Sprintf("on-demand reverse: %s", instName))
+	bc.SetInstanceName(instName)
+	return bc, nil
+}
+
+// newInstanceName generates a unique instance name for an on-demand buildlet.
+func (p *ReverseBuildletPool) newInstanceName(hostType string) string {
+	p.mu.Lock()
+	p.startSeq++
+	seq := p.startSeq
+	p.mu.Unlock()
+	return fmt.Sprintf("buildlet-%s-rn%d-%s", strings.TrimPrefix(hostType, "host-"), seq, randHex(6))
 }
 
 // WriteHTMLStatus writes a status of the reverse buildlet pool, in HTML format,
@@ -412,6 +482,9 @@ func (p *ReverseBuildletPool) HostTypes() (types []string) {
 func (p *ReverseBuildletPool) CanBuild(hostType string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, ok := p.provisioners[hostType]; ok {
+		return true // can always build via on-demand provisioning
+	}
 	for _, b := range p.buildlets {
 		if b.hostType == hostType {
 			return true

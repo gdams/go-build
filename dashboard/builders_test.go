@@ -91,7 +91,8 @@ func TestTrybots(t *testing.T) {
 		{
 			repo:   "go",
 			branch: "master",
-			want:   []string{
+			want: []string{
+				"windows-arm64-11-gha",
 				// Stopped.
 				//"freebsd-amd64-12_3",
 				//"linux-386",
@@ -108,7 +109,8 @@ func TestTrybots(t *testing.T) {
 		{
 			repo:   "go",
 			branch: "release-branch.go1.22",
-			want:   []string{
+			want: []string{
+				"windows-arm64-11-gha",
 				// Stopped.
 				//"freebsd-amd64-12_3",
 				//"linux-386",
@@ -131,7 +133,8 @@ func TestTrybots(t *testing.T) {
 		{
 			repo:   "go",
 			branch: "release-branch.go1.21",
-			want:   []string{
+			want: []string{
+				"windows-arm64-11-gha",
 				// Stopped.
 				//"freebsd-amd64-12_3",
 				//"linux-386",
@@ -167,6 +170,7 @@ func TestTrybots(t *testing.T) {
 			branch: "master",
 			want: []string{
 				"freebsd-386-13_0",
+				"windows-arm64-11-gha",
 				// Stopped.
 				//"freebsd-amd64-12_3",
 				//"freebsd-amd64-13_0",
