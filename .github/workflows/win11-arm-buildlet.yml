@@ -3,8 +3,8 @@
 # license that can be found in the LICENSE file.
 
 # This workflow is triggered by the coordinator via workflow_dispatch.
-# It provisions a Windows 11 ARM64 runner, connects to LUCI, runs
-# golangbuild, and connects back to the coordinator as a reverse buildlet.
+# It provisions a Windows 11 ARM64 runner and connects back to the
+# coordinator as a reverse buildlet.
 
 name: Windows 11 ARM Buildlet
 
@@ -31,44 +31,8 @@ jobs:
     timeout-minutes: 120
     env:
       GOMOTEID: ${{ inputs.instance_name }}
-      HAS_LUCI_SA: ${{ secrets.LUCI_SERVICE_ACCOUNT != '' }}
 
     steps:
-      - name: Install CIPD tools
-        shell: pwsh
-        run: |
-          $cipdPlatform = "windows-arm64"
-
-          # Download cipd client.
-          $cipdUrl = "https://chrome-infra-packages.appspot.com/client?platform=$cipdPlatform&version=latest"
-          Invoke-WebRequest -Uri $cipdUrl -OutFile cipd.exe
-
-          # Install golangbuild and LUCI tools via CIPD.
-          @"
-          infra/experimental/golangbuild/$cipdPlatform latest
-          infra/tools/luci-auth/$cipdPlatform latest
-          infra/tools/bb/$cipdPlatform latest
-          infra/tools/cipd/$cipdPlatform latest
-          "@ | Out-File -FilePath cipd_packages.txt -Encoding UTF8
-
-          .\cipd.exe ensure -root tools -ensure-file cipd_packages.txt
-
-      - name: Authenticate with LUCI
-        if: env.HAS_LUCI_SA == 'true'
-        shell: pwsh
-        env:
-          LUCI_SERVICE_ACCOUNT_JSON: ${{ secrets.LUCI_SERVICE_ACCOUNT }}
-        run: |
-          # Write service account credentials to a temp file.
-          $saFile = Join-Path $env:TEMP "luci-sa.json"
-          $env:LUCI_SERVICE_ACCOUNT_JSON | Out-File -FilePath $saFile -Encoding UTF8
-
-          # Authenticate using service account.
-          .\tools\luci-auth login -service-account-json $saFile
-
-          # Clean up credentials file.
-          Remove-Item -Path $saFile -Force
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -83,35 +47,8 @@ jobs:
           go build -o buildlet.exe ./cmd/buildlet/
           Write-Host "Built buildlet.exe from source"
 
-      - name: Verify tools
+      - name: Run buildlet
         shell: pwsh
-        run: |
-          Write-Host "=== Buildlet ==="
-          Get-Item buildlet.exe | Select-Object Name, Length
-          Write-Host ""
-          Write-Host "=== CIPD tools ==="
-          Get-ChildItem tools -Recurse -Filter *.exe -ErrorAction SilentlyContinue | Select-Object Name, Length
-          Write-Host ""
-          Write-Host "All tools present:"
-          $expected = @("buildlet.exe", "tools\golangbuild.exe", "tools\luci-auth.exe", "tools\bb.exe", "tools\cipd.exe")
-          foreach ($tool in $expected) {
-            if (Test-Path $tool) {
-              Write-Host "  OK  $tool"
-            } else {
-              Write-Host "  MISSING  $tool"
-            }
-          }
-
-      - name: Run golangbuild setup
-        if: env.HAS_LUCI_SA == 'true'
-        shell: pwsh
-        run: |
-          $env:PATH = "$(Get-Location)\tools;$env:PATH"
-          .\tools\golangbuild.exe --mode=setup 2>&1 | Write-Host
-
-      - name: Connect buildlet to coordinator
-        shell: pwsh
-        timeout-minutes: 2
         env:
           COORDINATOR: ${{ inputs.coordinator }}
           INSTANCE_NAME: ${{ inputs.instance_name }}
